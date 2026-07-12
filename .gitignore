@@ -1,0 +1,103 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+*.egg
+.eggs/
+build/
+dist/
+develop-eggs/
+downloads/
+eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-manifest/
+MANIFEST
+
+# Virtual environments
+venv/
+.venv/
+env/
+.env
+ENV/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.project
+.pydevproject
+
+# OS
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Caesar runtime data (БД, логи, векторы, сокеты — НЕ в git)
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.sqlite
+*.sqlite3
+*.sock
+*.log
+*.log.*
+
+# Caesar runtime directories (структуру держим через .gitkeep, содержимое — нет)
+var/lib/caesar/*.db
+var/lib/caesar/*.db-journal
+var/lib/caesar/*.db-wal
+var/lib/caesar/*.db-shm
+var/lib/caesar/l3_vectors.db
+var/log/caesar/*
+var/run/*
+!var/lib/caesar/self/.gitkeep
+!var/lib/caesar/skills/.gitkeep
+!var/log/caesar/.gitkeep
+!var/run/.gitkeep
+
+# Секреты — НИКОГДА не коммитить
+.env
+etc/secrets.yaml
+etc/config.yaml
+*.secret
+*.key
+*.pem
+
+# Пользовательские загрузки и артефакты агента — НЕ в git
+upload/
+download/
+tool-results/
+tool_results/
+skills/
+
+# Test/build artifacts
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.mypy_cache/
+.ruff_cache/
+
+# Build
+*.whl
+*.tar.gz
+
+# Internal planning docs — НЕ в git (наше внутреннее дело; максимум код/фиксы)
+AGENTS.md
+worklog.md
+DEV_PLAN.md
+NIGHT_SPRINT.md
+*AUDIT*.md
+*SPRINT*.md
+*DEBUG*.md

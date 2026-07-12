@@ -1,0 +1,63 @@
+# Конфигурация агента
+# См. roadmap раздел 14.10 (reconfigure через чат — можно менять через разговор с агентом)
+
+# Режим работы:
+#   auto       — автоматически (рекомендуется)
+#   sandboxed  — обычный (песочница, безопасно)
+#   full       — полный (sudo, может сломать систему)
+mode: auto
+
+# Часовой пояс для cron-задач
+timezone: Europe/Moscow
+
+# Язык по умолчанию для ответов
+language: ru
+
+# LLM-провайдер (см. roadmap раздел 9)
+llm:
+  smart_provider: openai
+  smart_model: gpt-4o
+  smart_api_key: ""
+  # smart_base_url: https://api.openai.com/v1
+  
+  cheap_provider: openai
+  cheap_model: gpt-4o-mini
+  cheap_api_key: ""
+  # cheap_base_url: https://api.openai.com/v1
+
+# Telegram (см. roadmap раздел 11.4)
+telegram:
+  bot_token: ""
+  read_mode: web  # web | mtproto
+  mtproto_api_id: ""
+  mtproto_api_hash: ""
+
+# Очередь задач (см. roadmap раздел 12)
+queue:
+  max_interactive_workers: 5
+  max_background_workers: 10
+  reserved_cron_workers: 1
+  waiting_for_user_timeout_hours: 24
+
+# Оркестратор (см. roadmap раздел 10)
+orchestrator:
+  reflection_mode: adaptive  # adaptive | always | never | on_error_only
+  reflection_interval_steps: 5
+  reflection_on_subtask_switch: true
+  reflection_on_error: true
+  reflection_allow_explicit_call: true
+  
+  max_steps_simple: 25
+  max_steps_medium: 50
+  max_steps_complex: 100
+  
+  max_tokens_simple: 50000
+  max_tokens_medium: 150000
+  max_tokens_complex: 500000
+  
+  max_time_simple_min: 10
+  max_time_medium_min: 60
+  max_time_complex_min: 240
+  
+  max_retries_per_step: 3
+  action_dedup_threshold: 3

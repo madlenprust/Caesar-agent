@@ -1,0 +1,257 @@
+#!/usr/bin/env python3
+"""CLI-клиент агента (thin client).
+
+Подключается к daemon через unix socket, передаёт сообщение, получает ответ.
+Не загружает логику агента — вся логика в daemon.
+
+Два режима (см. roadmap раздел 13.2):
+- `agent "текст"` → one-shot
+- `agent` → REPL
+
+Также:
+- `agent --status` → статус daemon
+- `agent --task <id>` → посмотреть задачу
+"""
+
+import argparse
+import asyncio
+import json
+import os
+import sys
+from pathlib import Path
+
+# Добавляем путь к агенту
+SCRIPT_DIR = Path(__file__).parent.parent
+sys.path.insert(0, str(SCRIPT_DIR))
+
+from agent.config import SOCKET_PATH
+
+
+async def send_to_daemon(request: dict) -> dict | None:
+    """Отправить запрос в daemon через unix socket."""
+    if not SOCKET_PATH.exists():
+        print(f"❌ Socket не найден: {SOCKET_PATH}", file=sys.stderr)
+        print(f"   Daemon запущен? Проверь: systemctl status agent-daemon", file=sys.stderr)
+        return None
+    
+    try:
+        reader, writer = await asyncio.open_unix_connection(str(SOCKET_PATH))
+    except Exception as e:
+        print(f"❌ Не могу подключиться к daemon: {e}", file=sys.stderr)
+        return None
+    
+    try:
+        # Отправляем запрос
+        line = json.dumps(request, ensure_ascii=False) + "\n"
+        writer.write(line.encode("utf-8"))
+        await writer.drain()
+        
+        # Читаем ответ
+        response_line = await reader.readline()
+        if not response_line:
+            print("❌ Daemon закрыл соединение без ответа", file=sys.stderr)
+            return None
+        
+        return json.loads(response_line.decode("utf-8"))
+    
+    except json.JSONDecodeError as e:
+        print(f"❌ Неверный ответ от daemon: {e}", file=sys.stderr)
+        return None
+    finally:
+        writer.close()
+        try:
+            await writer.wait_closed()
+        except Exception:
+            pass
+
+
+async def poll_events(session_id: str) -> None:
+    """Опрашивать events у daemon и показывать прогресс.
+    
+    В one-shot режиме: показываем прогресс и финальный ответ.
+    """
+    user_id = f"cli-{os.getuid()}"
+    
+    while True:
+        request = {
+            "action": "get_events",
+            "session_id": session_id,
+            "user_id": user_id,
+            "timeout": 30,
+        }
+        
+        response = await send_to_daemon(request)
+        if not response:
+            print("❌ Нет ответа от daemon", file=sys.stderr)
+            return
+        
+        if "error" in response:
+            print(f"❌ Ошибка: {response.get('message', response['error'])}", file=sys.stderr)
+            return
+        
+        events = response.get("events", [])
+        
+        for event in events:
+            event_type = event["type"]
+            data = event.get("data", {})
+            
+            if event_type == "progress_start":
+                print("🧠", end="", flush=True)
+            elif event_type == "progress_update":
+                icon = data.get("icon", "")
+                # Не дублируем подряд одинаковые
+                # (в реальной реализации это делается в CLISession)
+                print(f" {icon}", end="", flush=True)
+            elif event_type == "answer_ready":
+                content = data.get("content", "")
+                print()  # перенос после иконок
+                print("─── готово ───")
+                print(content)
+                return
+            elif event_type == "error_occurred":
+                print()
+                print(f"─── не получилось ───")
+                print(data.get("message", "Неизвестная ошибка"))
+                return
+            elif event_type == "info_notification":
+                print(f"ℹ️ {data.get('message', '')}")
+            elif event_type == "warning_notification":
+                print(f"⚠️ {data.get('message', '')}")
+            elif event_type == "question_asked":
+                print()
+                question = data.get("question", "")
+                options = data.get("options", [])
+                print(f"❓ {question}")
+                if options:
+                    for i, opt in enumerate(options, 1):
+                        print(f"   {i}. {opt.get('label', '')}")
+                    # В one-shot режиме пользователь вводит ответ в терминале
+                    answer = input("> ")
+                    # TODO: отправить ответ обратно
+                return
+
+
+async def one_shot(message: str) -> int:
+    """One-shot режим: отправить сообщение, получить ответ."""
+    user_id = f"cli-{os.getuid()}"
+    
+    # Отправляем сообщение
+    request = {
+        "action": "send_message",
+        "user_id": user_id,
+        "message": message,
+        "channel_name": "main",
+    }
+    
+    response = await send_to_daemon(request)
+    if not response:
+        return 1
+    
+    if "error" in response:
+        print(f"❌ {response.get('message', response['error'])}", file=sys.stderr)
+        return 1
+    
+    session_id = response.get("session_id")
+    if not session_id:
+        print("❌ Daemon не вернул session_id", file=sys.stderr)
+        return 1
+    
+    # Опрашиваем events
+    await poll_events(session_id)
+    return 0
+
+
+async def repl() -> int:
+    """REPL режим: интерактивный цикл."""
+    print("🤖 Agent REPL. /help для помощи, /exit для выхода.")
+    print()
+    
+    user_id = f"cli-{os.getuid()}"
+    session_id = None
+    
+    while True:
+        try:
+            message = input("> ").strip()
+        except (EOFError, KeyboardInterrupt):
+            print()
+            break
+        
+        if not message:
+            continue
+        
+        if message == "/exit":
+            break
+        elif message == "/help":
+            print("Команды:")
+            print("  /exit — выйти")
+            print("  /status — статус daemon")
+            print("  /tasks — активные задачи")
+            print("  Любой другой текст — сообщение агенту")
+            continue
+        elif message == "/status":
+            response = await send_to_daemon({"action": "get_status", "user_id": user_id})
+            if response:
+                print(json.dumps(response, indent=2, ensure_ascii=False))
+            continue
+        
+        # Отправляем сообщение
+        request = {
+            "action": "send_message",
+            "user_id": user_id,
+            "message": message,
+            "channel_name": "main",
+        }
+        
+        if session_id:
+            request["session_id"] = session_id
+        
+        response = await send_to_daemon(request)
+        if not response:
+            continue
+        
+        if "error" in response:
+            print(f"❌ {response.get('message', response['error'])}")
+            continue
+        
+        session_id = response.get("session_id", session_id)
+        
+        # Опрашиваем events
+        await poll_events(session_id)
+        print()
+    
+    return 0
+
+
+async def main() -> int:
+    parser = argparse.ArgumentParser(description="Agent CLI client")
+    parser.add_argument(
+        "message",
+        nargs="*",
+        help="Сообщение агенту (one-shot режим). Без аргументов — REPL.",
+    )
+    parser.add_argument("--status", action="store_true", help="Статус daemon")
+    parser.add_argument("--version", action="store_true", help="Версия")
+    
+    args = parser.parse_args()
+    
+    if args.version:
+        from agent import __version__
+        print(f"Agent CLI v{__version__}")
+        return 0
+    
+    if args.status:
+        response = await send_to_daemon({"action": "get_status"})
+        if response:
+            print(json.dumps(response, indent=2, ensure_ascii=False))
+            return 0
+        return 1
+    
+    if args.message:
+        message = " ".join(args.message)
+        return await one_shot(message)
+    
+    return await repl()
+
+
+if __name__ == "__main__":
+    sys.exit(asyncio.run(main()))

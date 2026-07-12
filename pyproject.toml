@@ -1,0 +1,100 @@
+[build-system]
+requires = ["setuptools>=68", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "caesar"
+dynamic = ["version"]
+description = "Caesar — автономный AI-агент для Ubuntu без GUI"
+requires-python = ">=3.12"
+readme = "README.md"
+license = {text = "MIT"}
+authors = [
+    {name = "Caesar Project"},
+]
+keywords = ["ai", "agent", "automation", "telegram", "cli", "autonomous"]
+classifiers = [
+    "Programming Language :: Python :: 3.12",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: POSIX :: Linux",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
+
+dependencies = [
+    "pyyaml>=6.0",
+    "httpx>=0.27",
+    "sdnotify>=0.3",
+]
+
+[project.optional-dependencies]
+llm = [
+    # Ставятся отдельно по необходимости:
+    # openai, anthropic, litellm
+]
+memory = [
+    # sentence-transformers (для BGE-M3)
+    # sqlite-vec
+]
+documents = [
+    "pdfplumber>=0.11",
+    "python-docx>=1.1",
+    "openpyxl>=3.1",
+]
+telegram = [
+    "aiogram>=3.7",
+    "telegramify-markdown>=0.1",
+]
+voice = [
+    "faster-whisper>=1.0",
+]
+l3 = [
+    "sentence-transformers>=2.7",
+]
+cron = [
+    "APScheduler>=3.10",
+]
+scheduler = [
+    "APScheduler>=3.10",
+    "feedparser>=6.0",
+]
+all = [
+    "pdfplumber>=0.11",
+    "python-docx>=1.1",
+    "openpyxl>=3.1",
+    "APScheduler>=3.10",
+    "feedparser>=6.0",
+    "faster-whisper>=1.0",
+    "sentence-transformers>=2.7",
+]
+dev = [
+    "pytest>=8.0",
+    "pytest-asyncio>=0.23",
+    "ruff>=0.6",
+    "mypy>=1.10",
+]
+
+[project.scripts]
+caesar = "caesar.cli_bridge:main"
+
+[tool.setuptools.packages.find]
+include = ["caesar*"]
+
+[tool.setuptools.dynamic]
+version = {attr = "caesar.__version__"}
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
+testpaths = ["scripts", "tests"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py312"
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I", "N", "B", "UP"]
+ignore = ["E501"]
+
+[tool.mypy]
+python_version = "3.12"
+strict = true
+ignore_missing_imports = true
