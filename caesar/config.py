@@ -82,6 +82,10 @@ class TelegramConfig:
     read_mode: str = "web"  # web | mtproto
     mtproto_api_id: str = ""
     mtproto_api_hash: str = ""
+    # Авторизация: список chat_id, которым разрешено пользоваться ботом.
+    # Пустой список = fail-closed (никто не допущен, пока владелец не впишет свой
+    # chat_id). Чтобы узнать свой chat_id — напиши боту, он ответит в отказе.
+    allowed_chat_ids: list[int] = field(default_factory=list)
 
 
 @dataclass

@@ -47,19 +47,17 @@ class ShellExecTool(Tool):
     }
     
     async def execute(self, command: str, timeout: int = 30, cwd: str | None = None, **_) -> ToolResult:
-        # Проверка на exact_deny (rm -rf /, mkfs, dd of=/dev/) — ТОЛЬКО в sandboxed mode.
-        # В full mode (config.mode=full) ИЛИ god mode НЕ блокируем НИЧЕГО.
-        if self.access_mode != "full" and not self.god_mode:
-            is_dangerous, pattern = is_dangerous_command(command)
-            if is_dangerous:
-                return ToolResult(
-                    success=False,
-                    error=f"BLOCKED: команда в чёрном списке необратимых операций. "
-                          f"Совпадение с паттерном: {pattern}. "
-                          f"Уточни путь или используй более безопасную альтернативу. "
-                          f"Для полного доступа поставь mode: full в config.yaml "
-                          f"или напиши 'газ в пол' для god mode.",
-                )
+        # exact_deny (rm -rf /, mkfs, dd of=/dev/, chmod -R 777 /, ...) срабатывает
+        # ВСЕГДА — до выполнения, и НЕ отключается ни god_mode, ни full
+        # (PRINCIPLES #9: «Не отключается через UI/чат»).
+        is_dangerous, pattern = is_dangerous_command(command)
+        if is_dangerous:
+            return ToolResult(
+                success=False,
+                error=f"BLOCKED (exact_deny): необратимая операция. {pattern}. "
+                      f"Этот список не отключается ничем — уточни путь или выбери "
+                      f"безопасную альтернативу.",
+            )
         
         # Проверка таймаута
         timeout = min(max(timeout, 1), 300)

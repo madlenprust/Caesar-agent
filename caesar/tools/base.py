@@ -21,47 +21,159 @@ from typing import Any
 from caesar.logging_setup import get_logger
 
 
-# exact_deny — зашитый чёрный список необратимых операций (раздел 11.1)
-EXACT_DENY_PATTERNS = [
-    r"^rm\s+-rf?\s+/(?!tmp/|var/tmp/)",  # rm -rf /, но не /tmp/
-    r"^rm\s+-rf?\s+~",
-    r"^rm\s+-rf?\s+/etc\b",
-    r"^rm\s+-rf?\s+/var\b",
-    r"^rm\s+-rf?\s+/home\b",
-    r"^rm\s+-rf?\s+/usr\b",
-    r"^rm\s+-rf?\s+/boot\b",
-    r"^mkfs\.\w+\s+/dev/",
-    r"^dd\s+if=.*\s+of=/dev/",
-    r"^:\(\)\s*\{\s*:\|:&\s*\};\s*:",
-    r"^chmod\s+-R\s+777\s+/",
-    r"^chmod\s+-R\s+000\s+/",
-    r"^chown\s+-R\s+\S+\s+/",
-    r"^systemctl\s+disable\s+(sshd|networking|systemd-network)",
-    r"^>\s*/dev/(sda|nvme|hda|vd)",
-    r"^pip\s+uninstall\s+-y\s+pip",
-    r"^npm\s+uninstall\s+-g\s+npm",
-    # Обход через bash -c / python -c / sh -c
-    r"bash\s+-c\s+.*\brm\s+-rf\b",
-    r"sh\s+-c\s+.*\brm\s+-rf\b",
-    r"python3?\s+-c\s+.*\b(os\.system|subprocess|os\.remove|shutil\.rmtree)\b",
-    r"bash\s+-c\s+.*\bmkfs\b",
-    r"bash\s+-c\s+.*\bdd\s+if=",
-    r"bash\s+-c\s+.*\bchmod\s+-R\b",
+# exact_deny — зашитый чёрный список необратимых операций (раздел 11.1).
+# Срабатывает ВСЕГДА, до выполнения, и НЕ отключается ни god_mode, ни full
+# (PRINCIPLES #9: «Не отключается через UI/чат»).
+# Устойчив к обходам: chaining (&& ; | ||), command substitution ($(...) `...`),
+# eval "...", и reorder флагов (rm -fr /, rm -r -f /).
+
+# Защищённые от rm -rf пути: корень и системные каталоги верхнего уровня.
+_RM_PROTECTED_PREFIXES = (
+    "/", "/etc", "/var", "/home", "/usr", "/boot", "/bin", "/sbin",
+    "/lib", "/lib64", "/root", "/opt", "/proc", "/sys", "/run", "/srv",
+)
+_RM_ALLOWED_TMP = ("/tmp", "/var/tmp")
+
+
+def _split_subcommands(command: str) -> list[str]:
+    """Разбить shell-команду на под-команды, раскрыв $(...), `...` и eval "...".
+
+    Quote-aware: разделители (&& ; || |) режут только ВНЕ кавычек, иначе
+    `python3 -c "import os; os.system(...)"` разрезалось бы по `;` внутри
+    аргумента. Так опасная операция внутри любой ветки составной команды или
+    подстановки попадает под проверку exact_deny.
+    """
+    # 1) Раскрываем command substitution, backticks и eval — их содержимое
+    #    тоже проверяем как отдельные под-команды.
+    expanded = re.sub(r"\$\(([^)]*)\)", r" \1 ", command)
+    expanded = re.sub(r"`([^`]*)`", r" \1 ", expanded)
+    expanded = re.sub(r'\beval\s+["\']([^"\']*)["\']', r" \1 ", expanded)
+
+    parts: list[str] = []
+    buf: list[str] = []
+    quote: str | None = None
+    i = 0
+    n = len(expanded)
+    while i < n:
+        c = expanded[i]
+        if quote:
+            buf.append(c)
+            if c == "\\" and quote == '"':  # escape внутри двойных кавычек
+                if i + 1 < n:
+                    buf.append(expanded[i + 1])
+                    i += 1
+            elif c == quote:
+                quote = None
+            i += 1
+            continue
+        if c in ('"', "'"):
+            quote = c
+            buf.append(c)
+            i += 1
+            continue
+        two = expanded[i:i + 2]
+        if two in ("&&", "||"):
+            parts.append("".join(buf))
+            buf = []
+            i += 2
+            continue
+        if c in (";", "|"):
+            parts.append("".join(buf))
+            buf = []
+            i += 1
+            continue
+        buf.append(c)
+        i += 1
+    if buf:
+        parts.append("".join(buf))
+    return [p.strip() for p in parts if p.strip()]
+
+
+def _rm_recursive_force_targets(cmd: str) -> str | None:
+    """Если cmd = rm с рекурсией И форсированием (любой порядок/группировка флагов)
+    на защищённый путь — вернуть этот путь, иначе None.
+    """
+    try:
+        argv = shlex.split(cmd, posix=True)
+    except ValueError:
+        argv = cmd.split()
+    if not argv or argv[0] != "rm":
+        return None
+    flag_chars: set[str] = set()
+    targets: list[str] = []
+    for a in argv[1:]:
+        if a.startswith("--"):
+            if a in ("--recursive",):
+                flag_chars.add("r")
+            elif a in ("--force",):
+                flag_chars.add("f")
+            continue
+        if a.startswith("-") and len(a) > 1:
+            flag_chars.update(a[1:])  # буквы после '-', в любом порядке
+            continue
+        targets.append(a)
+    if not ("r" in flag_chars and "f" in flag_chars):
+        return None
+    for t in targets:
+        if any(t == p or t.startswith(p + "/") for p in _RM_ALLOWED_TMP):
+            continue
+        if t == "~" or t == "/" or any(t == p or t.startswith(p + "/") for p in _RM_PROTECTED_PREFIXES if p != "/"):
+            return t
+        if t.startswith("~"):  # ~, ~/..., ~user/...
+            return t
+    return None
+
+
+# Паттерны (не-rm), проверяемые по каждой изолированной под-команде.
+_DENY_PER_SUBCMD: list[tuple[re.Pattern, str]] = [
+    (re.compile(r"^mkfs\.\w+\s+/dev/"), "mkfs на блочное устройство"),
+    (re.compile(r"^dd\s+if=\S*\s+of=/dev/"), "dd of= в устройство"),
+    (re.compile(r"^:\s*\(\s*\)\s*\{.*\}.*;.*:"), "fork bomb :(){ :|:& };:"),
+    (re.compile(r"^chmod\s+-R\s+(?:000|777)\s+/(?!tmp/|var/tmp/)"), "chmod -R 000/777 /"),
+    (re.compile(r"^chown\s+-R\s+\S+\s+/(?!tmp/|var/tmp/)"), "chown -R /"),
+    (re.compile(r"^systemctl\s+(?:disable|mask)\s+(?:sshd|networking|systemd-network)\b"), "disable sshd/networking"),
+    (re.compile(r"^>\s*/dev/(?:sd|nvme|hd|vd)"), "redirect в блочное устройство"),
+    (re.compile(r"^pip\s+uninstall\s+-y\s+pip\b"), "uninstall pip"),
+    (re.compile(r"^npm\s+uninstall\s+-g\s+npm\b"), "uninstall npm"),
+    # интерпретаторы -c/-e с деструктивом
+    (re.compile(r"^(?:bash|sh|zsh|dash)\s+-c\b.*\b(?:rm\s+-r|mkfs|dd\s+if=|chmod\s+-R|chown\s+-R|>\s*/dev/)"), "sh -c с деструктивом"),
+    (re.compile(r"^(?:python3?|node|ruby|perl)\s+-\w*[ec]\b.*\b(os\.system|subprocess|os\.remove|shutil\.rmtree|os\.unlink)"), "interp -c с деструктивом"),
 ]
 
-EXACT_DENY_REGEXES = [re.compile(p) for p in EXACT_DENY_PATTERNS]
+
+# Паттерны, проверяемые по ЦЕЛОЙ команде (не режутся сплиттером —
+# их сигнатура размазана по составной команде, напр. fork bomb :(){ :|:& };:).
+_WHOLE_DENY: list[tuple[re.Pattern, str]] = [
+    (re.compile(r":\s*\(\s*\)\s*\{.*&.*;.*:"), "fork bomb :(){ :|:& };:"),
+]
 
 
 def is_dangerous_command(command: str) -> tuple[bool, str | None]:
-    """Проверить, является ли команда опасной (exact_deny).
-    
-    Возвращает (is_dangerous, reason).
+    """Проверить команду на exact_deny (необратимые операции).
+
+    Устойчива к обходам: chaining (&&;||;|), $(...)/backticks/eval, и reorder
+    флагов (rm -fr /, rm -r -f /). Возвращает (is_dangerous, reason).
     """
     cmd = command.strip()
-    for i, pattern in enumerate(EXACT_DENY_REGEXES):
-        if pattern.search(cmd):
-            return True, EXACT_DENY_PATTERNS[i]
+    # 0) whole-command сигнатуры (fork bomb и т.п.)
+    for rx, reason in _WHOLE_DENY:
+        if rx.search(cmd):
+            return True, reason
+    # 1) по каждой изолированной под-команде
+    for sub in _split_subcommands(command):
+        s = sub.strip()
+        if not s:
+            continue
+        # rm -rf на защищённые пути (любой порядок флагов)
+        tgt = _rm_recursive_force_targets(s)
+        if tgt is not None:
+            return True, f"rm -rf на защищённый путь: {tgt}"
+        # остальные паттерны
+        for rx, reason in _DENY_PER_SUBCMD:
+            if rx.search(s):
+                return True, reason
     return False, None
+
 
 
 @dataclass
