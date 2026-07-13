@@ -11,7 +11,7 @@ import subprocess
 from pathlib import Path
 from typing import Any
 
-from caesar.tools.base import Tool, ToolResult, is_dangerous_command
+from caesar.tools.base import Tool, ToolResult, is_dangerous_command, references_secret_path
 
 
 class ShellExecTool(Tool):
@@ -59,6 +59,15 @@ class ShellExecTool(Tool):
                     error=f"BLOCKED (exact_deny): необратимая операция. {pattern}. "
                           f"В sandboxed не отключается. Для полного доступа — "
                           f"god mode ('газ в пол') или mode: full в config.yaml.",
+                )
+            # Защита от эксфильтрации секретов (~/.ssh, config с ключами, /etc/shadow, .env).
+            # В god/full обходит — владелец берёт ответственность.
+            if references_secret_path(command):
+                return ToolResult(
+                    success=False,
+                    error="BLOCKED (sandboxed): команда обращается к секретному пути "
+                          "(~/.ssh, ~/.config/caesar, /etc/shadow, .env). "
+                          "В god/full — можно.",
                 )
         
         # Проверка таймаута
@@ -146,6 +155,8 @@ class ReadFileTool(Tool):
     name = "read_file"
     description = "Прочитать текстовый файл. Можно указать диапазон строк. Максимум 2000 строк или 100KB за вызов."
     category = "shell_files"
+    access_mode: str = "sandboxed"  # устанавливается ToolRegistry
+    god_mode: bool = False  # устанавливается orchestrator-ом
     parameters_schema = {
         "type": "object",
         "properties": {
@@ -157,6 +168,12 @@ class ReadFileTool(Tool):
     }
     
     async def execute(self, path: str, start: int = 1, end: int | None = None, **_) -> ToolResult:
+        # В sandboxed не даём читать секреты (~/.ssh, config с ключами, /etc/shadow).
+        if self.access_mode != "full" and not self.god_mode and references_secret_path(path):
+            return ToolResult(
+                success=False,
+                error="BLOCKED (sandboxed): чтение секретного пути запрещено. В god/full — можно.",
+            )
         try:
             p = Path(path).expanduser()
             if not p.exists():

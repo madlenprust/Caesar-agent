@@ -378,7 +378,23 @@ class Orchestrator:
                         except Exception:
                             pass
                     shell_tool.god_mode = is_god
-                    tool_result = await shell_tool.execute(command=direct_cmd, timeout=30)
+                    # requires_permission (мягкий gate: sudo/chmod-R/systemctl/...)
+                    # — в sandboxed проверяем и для прямых команд (god/full обходит).
+                    needs_perm = (
+                        shell_tool.access_mode != "full"
+                        and not is_god
+                        and hasattr(shell_tool, "requires_permission")
+                        and shell_tool.requires_permission(command=direct_cmd)
+                    )
+                    if needs_perm:
+                        from caesar.tools.base import ToolResult
+                        tool_result = ToolResult(
+                            success=False,
+                            error=f"BLOCKED (sandboxed): прямая команда требует "
+                                  f"god/full. Команда: {direct_cmd[:80]}",
+                        )
+                    else:
+                        tool_result = await shell_tool.execute(command=direct_cmd, timeout=30)
                 else:
                     # Fallback на ToolRegistry (с проверкой permission)
                     tool_result = await self.tools.execute("shell_exec", command=direct_cmd, timeout=30)

@@ -262,6 +262,25 @@ class SkillExecutor:
                 error=f"Unknown step type: {step_type}",
             )
     
+    def _sandbox_blocked(self, command: str) -> str | None:
+        """В sandboxed (без god) — блокировать деструктив/эксфильтрацию в шагах
+        скилла. god/full обходит (как shell_exec). Возвращает reason или None.
+        """
+        if not self.tools:
+            return None
+        if getattr(self.tools, "access_mode", "sandboxed") == "full":
+            return None
+        shell_tool = self.tools.get("shell_exec") if hasattr(self.tools, "get") else None
+        if getattr(shell_tool, "god_mode", False):
+            return None
+        from caesar.tools.base import is_dangerous_command, references_secret_path
+        dd, pat = is_dangerous_command(command)
+        if dd:
+            return f"exact_deny ({pat})"
+        if references_secret_path(command):
+            return "секретный путь (sandboxed)"
+        return None
+
     async def _execute_script_step(
         self, step: dict, variables: dict, step_index: int,
     ) -> StepResult:
@@ -278,7 +297,15 @@ class SkillExecutor:
         
         # Подстановка переменных: {name} → value
         command = self._substitute_variables(command_template, variables)
-        
+
+        # sandboxed: не даём деструктив/эксфильтрацию в шагах скилла (god/full обходит).
+        block = self._sandbox_blocked(command)
+        if block:
+            return StepResult(
+                step_index=step_index, step_type="script",
+                success=False, error=f"BLOCKED (sandboxed): {block}. В god/full — можно.",
+            )
+
         # Выполняем через subprocess
         try:
             proc = await asyncio.create_subprocess_shell(
@@ -482,7 +509,13 @@ class SkillExecutor:
             adapted_command = resp.content.strip()
             if not adapted_command or adapted_command == step_command:
                 return None  # LLM не смог адаптировать
-            
+
+            # sandboxed: адаптированная LLM-команда тоже проверяется (god/full обходит).
+            block = self._sandbox_blocked(adapted_command)
+            if block:
+                self.log.warning(f"LLM fallback blocked in sandboxed: {block}")
+                return None
+
             # Пробуем выполнить адаптированную команду
             self.log.info(f"LLM adapted command: {adapted_command[:100]}")
             

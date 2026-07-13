@@ -175,6 +175,28 @@ def is_dangerous_command(command: str) -> tuple[bool, str | None]:
     return False, None
 
 
+# Секретные пути/маркеры — в sandboxed чтение/отправка блокируется (god/full обходит).
+# Узко: только реальные секреты, чтобы не ломать легальные cat/curl.
+SECRET_PATH_MARKERS = (
+    "~/.ssh", ".ssh/id_rsa", ".ssh/id_ed25519", ".ssh/id_ecdsa", ".ssh/id_dsa",
+    "~/.gnupg", "/.gnupg/",
+    "/etc/shadow", "/etc/gshadow", "/etc/ssh/",
+    "~/.config/caesar",  # config.yaml (bot token + LLM keys) + secrets.yaml
+    "secrets.yaml",
+    "/.env", "~/.env",  # env-файлы с секретами
+)
+
+
+def references_secret_path(text: str) -> bool:
+    """Содержит ли команда/путь ссылку на секретное расположение (~/.ssh, config
+    с ключами, /etc/shadow, .env и т.п.). Только для sandboxed-режима.
+    """
+    for marker in SECRET_PATH_MARKERS:
+        if marker in text:
+            return True
+    return False
+
+
 
 @dataclass
 class ToolResult:
