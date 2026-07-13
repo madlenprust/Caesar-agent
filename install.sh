@@ -2,7 +2,7 @@
 # Caesar bootstrap installer
 # ============================================================
 # Установка одной командой:
-#   curl -fsSL https://raw.githubusercontent.com/madlenprust/caesar/main/install.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/madlenprust/Caesar-agent/main/install.sh | bash
 #
 # Подход (как у Ari): user-space установка, без /opt и sudo для кода.
 # - Клон в ~/caesar
@@ -30,7 +30,7 @@ error() { echo -e "${RED}❌${NC} $1" >&2; }
 step()  { echo -e "${BLUE}🔧${NC} $1"; }
 
 # Defaults — всё в домашней папке пользователя
-REPO_URL="${CAESAR_REPO:-https://github.com/madlenprust/caesar.git}"
+REPO_URL="${CAESAR_REPO:-https://github.com/madlenprust/Caesar-agent.git}"
 BRANCH="${CAESAR_BRANCH:-main}"
 REPO_DIR="${CAESAR_REPO_DIR:-${HOME}/caesar}"
 VENV_DIR="${HOME}/.local/share/caesar/venv"
@@ -76,7 +76,7 @@ while [[ $# -gt 0 ]]; do
 Caesar installer (user-space, без sudo для кода).
 
 Usage:
-  curl -fsSL https://raw.githubusercontent.com/madlenprust/caesar/main/install.sh | bash
+  curl -fsSL https://raw.githubusercontent.com/madlenprust/Caesar-agent/main/install.sh | bash
   ./install.sh [options]
 
 Options:
@@ -411,5 +411,5 @@ echo "  systemctl --user status caesar-daemon"
 echo "  systemctl --user restart caesar-daemon"
 echo "  systemctl --user stop caesar-daemon caesar-watchdog"
 echo ""
-echo "Docs: https://github.com/madlenprust/caesar#readme"
+echo "Docs: https://github.com/madlenprust/Caesar-agent#readme"
 echo ""

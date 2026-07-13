@@ -2,28 +2,30 @@
 
 > Что изменилось в самом агенте.
 
-## V0.3 (2026-06-28)
+## v0.6 (2026-07-13)
 
-- Added: LLM-роутер с поддержкой OpenAI, Anthropic, Z.ai, Ollama
-- Added: Память L2 (SQLite temporal schema) — факты с valid_from/valid_until
-- Added: Память L3 (векторная, BGE-M3, cosine similarity)
-- Added: Память L4 (скиллы, YAML + SQLite, версионные)
-- Added: 27 инструментов в 6 категориях
-- Added: Оркестратор с ReAct циклом и Tool-First Enforcement
-- Added: Адаптивная рефлексия (4 режима для A/B тестирования)
-- Added: Счётчик токенов с логированием
-- Added: Telegram-адаптер (Bot API, карточки эмодзи, кнопки)
-- Added: Cron через APScheduler
+- Security: `allowed_chat_ids` (opt-in авторизация TG); `exact_deny` всегда
+  срабатывает (god_mode/full больше не обходят чёрный список); харденинг
+  `is_dangerous_command` — chaining (`&& ; |`), `$()`/backticks/eval, reorder
+  флагов (`rm -fr /`), fork-bomb.
+- Задачи пишутся в БД при работе → watchdog жив: зависшие задачи + re-delivery
+  cron-результатов работают.
+- L4: колонка `consecutive_failures` (3 подряд → broken, не lifetime);
+  `record_success` больше не падает; `_sync_from_yaml` не inflate'ит version
+  на рестарте.
+- `/stop` реально останавливает задачу (`Task.cancelled` — worker не resurrect'ит,
+  цикл выходит).
+- cron quiet hours → DEFERRED (перенос firing на конец тихих часов, а не skip).
 
-## V0.2 (2026-06-28)
+## v0.5
 
-- Added: Шина событий (EventBus, нейтральные events)
-- Added: Очередь задач (5+10 workers, без прерываний)
-- Added: Логирование (journald + файлы)
-- Added: Конфигурация (YAML + dataclasses)
+- Knowledge Graph (сущности + отношения), Dream Cycle (ночной цикл памяти),
+  Morning Briefing, Quiet Hours.
+- CLI: `caesar doctor / db / kg / config / skill / stats / cron`.
+- Loop-detector + multi-engine web_search; расширенный `/status`.
 
-## V0.1 (2026-06-28)
+## v0.3
 
-- Initial: Скелет проекта
-- Initial: Daemon + CLI thin client через unix socket
-- Initial: Эхо-режим (без LLM)
+- Скелет: daemon + CLI thin client (unix socket), шина событий, очередь задач,
+  оркестратор (ReAct + Skill-First + Tool-First), LLM-роутер (multi-provider),
+  память L2 (temporal) / L3 (vector) / L4 (skills), инструменты, TG-адаптер, cron.

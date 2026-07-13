@@ -1,79 +1,65 @@
 # Архитектура агента
 
-> Документ для самого агента — чтобы он понимал как устроен и мог безопасно расширять себя.
-> См. roadmap раздел 8 (Self-Knowledge Layer).
+> Документ для самого агента — чтобы он понимал, как устроен, и мог безопасно
+> расширять себя. Читай перед self-edit (PRINCIPLES #10).
+
+## Деплой (user-space, без sudo для кода)
+- Код: `~/caesar/` (git clone)
+- venv: `~/.local/share/caesar/venv/`
+- Данные (БД, скиллы, self-knowledge): `~/.local/share/caesar/data/`
+- Конфиг (секреты — НЕ в git): `~/.config/caesar/`
+- Логи: `~/.local/share/caesar/log/`
+- Сокет: `~/.local/share/caesar/caesar.sock`
+- Systemd user: `caesar-daemon.service`, `caesar-watchdog.service`
 
 ## Модули
-
-### core/ — ядро
-- `daemon.py` — главный daemon, запускается через systemd
+### core/
+- `daemon.py` — главный демон (systemd)
 - `events.py` — шина событий (capability-based rendering)
-- `queue.py` — очередь задач (5 интерактивных + 10 фоновых workers)
-- `orchestrator.py` — оркестратор: ReAct + Skill-First + Tool-First
-- `llm.py` — LLM-роутер: дешёвая анализирует, умная отвечает
-- `cron.py` — APScheduler, cron-задачи через разговор с пользователем
+- `queue.py` — очередь задач (interactive + background workers), персистится в БД
+- `orchestrator.py` — оркестратор: ReAct + Skill-First + Tool-First + loop-detector + /stop
+- `llm.py` — LLM-роутер: cheap анализирует, smart отвечает
+- `cron.py` — cron через разговор + quiet hours (deferred, не skip)
+- `briefing.py` — утренний дайджест
+- `status.py` — расширенный /status
+- `dream.py` — ночной цикл памяти (entity sweep, topic consolidation)
+- `skill_executor.py` — выполнение рецептов скиллов
 
-### memory/ — память
-- `storage.py` — SQLite: users, channels, tasks, l2_facts, l3_chunks, l4_skills, cron_tasks, permissions, token_usage
-- `l3.py` — векторная память (BGE-M3 + cosine similarity)
-- `l4.py` — скиллы (YAML + SQLite, версионные)
+### memory/
+- `storage.py` — SQLite (users, channels, tasks, l2_facts, l3_chunks, l4_skills, kg_entities, kg_relations, cron_tasks, permissions, token_usage)
+- `l3.py` — векторная память (embeddings + cosine)
+- `l4.py` — скиллы (YAML + SQLite, версионные, consecutive_failures)
+- `knowledge_graph.py` — сущности и отношения
 
-### tools/ — инструменты (27 шт в V0.3)
-- `base.py` — базовый класс Tool, exact_deny
-- `shell_files.py` — shell_exec, read_file, write_file, edit_file, find_files, grep
-- `internet.py` — web_search (DDG), web_fetch, http_request
-- `sources.py` — rss_read, tg_read_channel, hn_search, reddit_search, wikipedia_read
-- `documents.py` — parse_pdf, parse_docx, parse_xlsx, parse_csv
-- `memory_tools.py` — memory_search, memory_add_fact, skill_find, skill_save
-- `self_knowledge.py` — self_read, self_edit, self_install_package, self_scan, self_test
+### tools/
+- shell+files, интернет (web_search multi-engine, web_fetch, http_request),
+  источники (RSS, HN, reddit, wikipedia, TG-каналы), документы (pdf/docx/xlsx/csv),
+  память, self-knowledge
 
-### channels/ — каналы ввода/вывода
+### channels/
 - `cli_adapter.py` — CLI (через unix socket к daemon)
-- `telegram_adapter.py` — Telegram Bot API (long polling)
+- `telegram_adapter.py` — Telegram Bot API (long polling, карточки эмодзи)
 
-### watchdog/ — наблюдатель
-- Отдельный процесс, раз в 2 мин проверяет что daemon жив
+### watchdog/
+- Надзор: зависшие задачи, анализ диалогов, re-delivery cron (читает tasks из БД)
 
 ## Поток данных
-
-1. Сообщение от пользователя → channel adapter (TG/CLI)
-2. Adapter определяет user_id и channel_id
-3. Создаёт task в queue
-4. Worker (из 5 интерактивных или 10 фоновых) берёт task
-5. Worker вызывает orchestrator.handle_task(task)
-6. Orchestrator:
-   a. Эмитит progress_start event
-   b. Дешёвая LLM анализирует запрос
-   c. Если тривиальный — отвечает сама
-   d. Иначе умная LLM в ReAct цикле с инструментами
-   e. Каждый tool_call → progress_update event
-   f. Эмитит answer_ready event
-7. Channel adapter рендерит events в формат канала
-8. Пользователь видит карточку с эмодзи → финальный ответ
-
-## Ключевые принципы (см. PRINCIPLES.md)
-
-1. Экономия токенов — главный KPI
-2. Lazy loading контекста
-3. Stateless L1 (пересобирается каждый ход)
-4. Temporal facts в L2
-5. Tool-First Enforcement (физический запрет «хочешь, продолжим?»)
+1. Сообщение → channel adapter → user_id + channel_id
+2. Создаётся task в queue (пишется в БД — иначе watchdog слеп)
+3. Worker берёт task → orchestrator.handle_task
+4. Orchestrator: progress_start → cheap-LLM анализ → skill-first / smart-LLM ReAct
+   с инструментами → answer_ready (каждый tool_call → progress_update)
+5. Adapter рендерит events в формат канала
 
 ## Режимы доступа
+- `sandboxed` — песочница
+- `autonomous` — права пользователя, self_edit
+- `full` — sudo
 
-- `sandboxed` — обычный, агент в песочнице
-- `autonomous` — права пользователя, может self_edit
-- `full` — sudo, может всё
+**exact_deny** (`rm -rf /`, `mkfs`, `dd of=/dev/`, `chmod -R 777 /`, fork-bomb)
+НЕ отключается ничем — даже god_mode и full (PRINCIPLES #9).
 
-## Деплой
-
-- `/opt/agent/` — код (Python venv)
-- `/etc/agent/` — конфиги
-- `/var/lib/agent/` — данные (SQLite, скиллы, self-knowledge)
-- `/var/log/agent/` — логи
-- `/run/agent.sock` — unix socket для CLI
-
-## Systemd
-
-- `agent-daemon.service` — главный процесс
-- `agent-watchdog.service` — наблюдатель
+## Self-modification
+- `PRINCIPLES.md` — заблокирован от авто-редактирования
+- `ARCHITECTURE.md` / `CODE_MAP.md` — обновляются через self_edit (с git)
+- Все изменения — через git, можно откатить

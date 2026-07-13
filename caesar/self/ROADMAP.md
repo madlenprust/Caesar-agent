@@ -1,47 +1,32 @@
-# Roadmap развития агента
+# Roadmap агента
 
 > Куда развиваемся: что сделано, что в работе, планы.
 
-## Готово (V0.3)
+## Готово
+- ✅ Скелет (daemon + CLI + unix socket), конфиг, логирование, шина событий,
+  очередь задач (персистится в БД).
+- ✅ Оркестратор (ReAct + Skill-First + Tool-First + loop-detector), LLM-роутер
+  (multi-provider: OpenAI, Anthropic, Z.ai, Ollama, custom).
+- ✅ Память L2 (temporal facts) / L3 (vector) / L4 (skills), Knowledge Graph.
+- ✅ Инструменты: shell+files, web, источники (RSS/HN/reddit/wikipedia/TG),
+  документы, self-knowledge.
+- ✅ Telegram + CLI, Cron (+ quiet hours deferred), Watchdog, Dream Cycle,
+  Morning Briefing.
+- ✅ CLI: setup/update/rollback/doctor/db/kg/config/skill/stats/cron.
+- ✅ Security: `exact_deny` всегда, `allowed_chat_ids`, `/stop`.
 
-- ✅ Скелет проекта (daemon + CLI thin client через unix socket)
-- ✅ Конфигурация (YAML + dataclasses)
-- ✅ Логирование (journald + файлы с ротацией)
-- ✅ Шина событий (EventBus, нейтральные events)
-- ✅ Очередь задач (5 интерактивных + 10 фоновых workers)
-- ✅ Оркестратор (ReAct + Skill-First + Tool-First Enforcement)
-- ✅ LLM-роутер (cheap + smart, multi-provider: OpenAI, Anthropic, Z.ai, Ollama)
-- ✅ Память L2 (SQLite temporal schema)
-- ✅ Память L3 (векторная, BGE-M3)
-- ✅ Память L4 (скиллы, YAML + SQLite)
-- ✅ 27 инструментов (shell+files, интернет, источники, документы, память, self-knowledge)
-- ✅ CLI-адаптер (one-shot + REPL)
-- ✅ Telegram-адаптер (Bot API, карточки эмодзи, кнопки)
-- ✅ Cron (APScheduler + SQLite jobstore)
-
-## В работе (V0.7)
-
-- 🔄 Наблюдатель (watchdog процесс)
-- 🔄 Self-knowledge (этот документ + CODE_MAP.md)
-- 🔄 Self-modification (self_edit с git+тесты)
-
-## Запланировано (V1.0)
-
-- ⬜ Установщик (`curl ... | bash`, setup wizard)
-- ⬜ Systemd-юниты (agent-daemon.service, agent-watchdog.service)
-- ⬜ `agent update`, `agent rollback`, `agent uninstall`
-- ⬜ Базовые скиллы (add_llm_provider, setup_tg_channel, и т.д.)
-
-## Запланировано (V1.1+)
-
-- ⬜ Web-панель (для просмотра истории/логов)
-- ⬜ Webhook (для внешних интеграций)
-- ⬜ Голосовой ввод через Whisper
-- ⬜ Саморасширение кода (агент дописывает новые инструменты)
+## В работе / планы
+- 🔻 Реальный token-budget packing + numpy/sqlite-vec для L3 (сейчас char-budget
+  + pure-Python cosine, full-scan).
+- 🔻 Knowledge Graph как semantic triples (subject→relation→object вместо
+  regex + co-occurrence); интеграция в L3-ranking.
+- 🔻 Provider pacing (inter-request spacing) + meaning-based классификация
+  ошибок LLM (сейчас по HTTP-коду).
+- 🔻 Pause/resume mid-command (`interruption_check` в subprocess poll).
+- 🔻 Web-панель, webhook.
 
 ## Принципы развития
-
-1. Сначала простая рабочая версия, потом усложняем
-2. Каждый модуль тестируется отдельно перед интеграцией
-3. Roadmap обновляется после каждой закрытой темы
-4. Никаких «хотим сделать X» без конкретного сценария использования
+1. Сначала простая рабочая версия, потом усложняем.
+2. Каждый модуль тестируется отдельно перед интеграцией.
+3. Roadmap обновляется после каждой закрытой темы.
+4. Никаких «хотим сделать X» без конкретного сценария использования.
