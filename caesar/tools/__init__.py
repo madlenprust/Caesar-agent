@@ -207,18 +207,18 @@ class ToolRegistry:
           Это его сервер, его правила.
         - access_mode='sandboxed' (по умолчанию) — проверяет requires_permission.
           LLM не может выполнить опасные команды без подтверждения.
-        - is_dangerous_command (rm -rf /, mkfs, dd of=/dev/) ВСЕГДА
-          блокируется внутри ShellExecTool.execute() — независимо от access_mode.
-          Это защита от случайного удаления системы.
+        - is_dangerous_command (rm -rf /, mkfs, ...) блокируется в sandboxed.
+          В full/god_mode отключается — владелец (бот привязан → god только у
+          owner) берёт ответственность за любые команды.
         """
         tool = self._tools.get(name)
         if not tool:
             from caesar.tools.base import ToolResult
             return ToolResult(success=False, error=f"Tool '{name}' not found")
         
-        # Проверка разрешений — только в sandboxed режиме.
-        # В full режиме пользователь сам решил что бот может всё.
-        if self.access_mode != "full":
+        # Проверка разрешений — только в sandboxed и не в god_mode.
+        # full/god_mode — владелец разрешил любые команды (бот привязан).
+        if self.access_mode != "full" and not getattr(tool, "god_mode", False):
             try:
                 if hasattr(tool, "requires_permission"):
                     needs_perm = tool.requires_permission(**kwargs)

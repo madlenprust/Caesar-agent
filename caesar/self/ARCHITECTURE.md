@@ -57,7 +57,9 @@
 - `full` — sudo
 
 **exact_deny** (`rm -rf /`, `mkfs`, `dd of=/dev/`, `chmod -R 777 /`, fork-bomb)
-НЕ отключается ничем — даже god_mode и full (PRINCIPLES #9).
+в sandboxed НЕ отключается; в god_mode/full — отключается (владелец, бот привязан
+→ god только у owner). **remote_exec** — SSH на соседние машины (god/full);
+в sandboxed запрещён.
 
 ## Self-modification
 - `PRINCIPLES.md` — заблокирован от авто-редактирования

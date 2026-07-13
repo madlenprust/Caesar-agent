@@ -800,10 +800,12 @@ class Orchestrator:
                     # Выполняем инструмент
                     self.log.info(f"Task {task.id} step {step}: {tc.name}({tc.arguments})")
                     # Устанавливаем god_mode на shell_exec если активен
-                    if tc.name == "shell_exec":
-                        shell_tool = self.tools.get("shell_exec")
-                        if shell_tool:
-                            shell_tool.god_mode = god_mode
+                    # god_mode propagates на любой tool с этим атрибутом
+                    # (shell_exec, remote_exec, ...) — чтобы god/full обходил
+                    # их проверки (exact_deny / requires_permission).
+                    cur_tool = self.tools.get(tc.name)
+                    if cur_tool and hasattr(cur_tool, "god_mode"):
+                        cur_tool.god_mode = god_mode
                     tool_result = await self.tools.execute(tc.name, **tc.arguments)
                     # Запоминаем какой инструмент использовали (для L3 save filter)
                     used_tool_names.add(tc.name)

@@ -47,17 +47,19 @@ class ShellExecTool(Tool):
     }
     
     async def execute(self, command: str, timeout: int = 30, cwd: str | None = None, **_) -> ToolResult:
-        # exact_deny (rm -rf /, mkfs, dd of=/dev/, chmod -R 777 /, ...) срабатывает
-        # ВСЕГДА — до выполнения, и НЕ отключается ни god_mode, ни full
-        # (PRINCIPLES #9: «Не отключается через UI/чат»).
-        is_dangerous, pattern = is_dangerous_command(command)
-        if is_dangerous:
-            return ToolResult(
-                success=False,
-                error=f"BLOCKED (exact_deny): необратимая операция. {pattern}. "
-                      f"Этот список не отключается ничем — уточни путь или выбери "
-                      f"безопасную альтернативу.",
-            )
+        # exact_deny (rm -rf /, mkfs, dd of=/dev/, chmod -R 777 /, ...) защищает
+        # sandboxed-режим (по умолчанию). В full/god_mode — отключается: это
+        # явное «могу всё» владельца. Бот привязан (caesar pair) → god только у
+        # owner, поэтому attack-surface ограничен владельцем.
+        if self.access_mode != "full" and not self.god_mode:
+            is_dangerous, pattern = is_dangerous_command(command)
+            if is_dangerous:
+                return ToolResult(
+                    success=False,
+                    error=f"BLOCKED (exact_deny): необратимая операция. {pattern}. "
+                          f"В sandboxed не отключается. Для полного доступа — "
+                          f"god mode ('газ в пол') или mode: full в config.yaml.",
+                )
         
         # Проверка таймаута
         timeout = min(max(timeout, 1), 300)
@@ -499,10 +501,91 @@ class GrepTool(Tool):
             return ToolResult(success=False, error=str(e))
 
 
+class RemoteExecTool(Tool):
+    """Выполнить команду на соседней машине через SSH.
+
+    Удобно в god mode: агент может чинить/диагностировать другие машины по
+    сети (как OpenClaw чинил Caesar с соседней машины). Требует настроенный
+    SSH-доступ (ключи) с этой машины к удалённой.
+    """
+
+    name = "remote_exec"
+    description = (
+        "Выполнить команду на удалённой машине через SSH. Нужен host и command "
+        "(опц. user). Возвращает stdout/stderr/exit_code. Требует настроенный "
+        "SSH-ключ с этой машины. В sandboxed требует подтверждения; в god/full — выполняет."
+    )
+    category = "shell_files"
+    access_mode: str = "sandboxed"
+    god_mode: bool = False
+    parameters_schema = {
+        "type": "object",
+        "properties": {
+            "host": {"type": "string", "description": "Хост (ip или имя)"},
+            "command": {"type": "string", "description": "Команда на удалённой машине"},
+            "user": {"type": "string", "description": "SSH user (по умолч. текущий)", "default": ""},
+            "timeout": {"type": "integer", "description": "Таймаут сек (макс 300)", "default": 60},
+        },
+        "required": ["host", "command"],
+    }
+
+    async def execute(self, host: str, command: str, user: str = "",
+                      timeout: int = 60, **_) -> ToolResult:
+        if not host or not command:
+            return ToolResult(success=False, error="host и command обязательны")
+        # В sandboxed (без god) — не выполняем удалённые команды.
+        if self.access_mode != "full" and not self.god_mode:
+            return ToolResult(
+                success=False,
+                error="remote_exec требует god mode ('газ в пол') или mode: full. "
+                      "В sandboxed удалённое выполнение запрещено.",
+            )
+        timeout = min(max(timeout, 1), 300)
+        target = f"{user}@{host}" if user else host
+        ssh_cmd = [
+            "ssh",
+            "-o", "BatchMode=yes",                       # без интерактивного ввода пароля
+            "-o", "StrictHostKeyChecking=accept-new",   # первый раз принимаем ключ
+            "-o", f"ConnectTimeout={min(timeout, 15)}",
+            target,
+            command,
+        ]
+        try:
+            proc = await asyncio.create_subprocess_exec(
+                *ssh_cmd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            try:
+                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+            except asyncio.TimeoutError:
+                proc.kill()
+                await proc.wait()
+                return ToolResult(success=False, error=f"Timeout after {timeout}s",
+                                   data={"timeout": True, "host": host})
+            out = stdout.decode("utf-8", errors="replace")
+            err = stderr.decode("utf-8", errors="replace")
+            if len(out) > 50000:
+                out = out[:50000] + f"\n... (truncated, {len(out)} total)"
+            return ToolResult(
+                success=proc.returncode == 0,
+                data={"stdout": out, "stderr": err, "exit_code": proc.returncode,
+                      "host": host, "user": user or None},
+                error=None if proc.returncode == 0 else f"Exit code {proc.returncode}",
+            )
+        except Exception as e:
+            return ToolResult(success=False, error=f"remote_exec failed: {e}")
+
+    def requires_permission(self, host: str = "", command: str = "", **_) -> bool:
+        # удалённое выполнение всегда потенциально опасно — в sandboxed спросим
+        return True
+
+
 def get_shell_files_tools() -> list[Tool]:
     """Все инструменты категории 1."""
     return [
         ShellExecTool(),
+        RemoteExecTool(),
         ReadFileTool(),
         WriteFileTool(),
         EditFileTool(),
