@@ -349,6 +349,15 @@ class TaskQueue:
                         completed_at=task.completed_at,
                         result=task.result, tokens_used=task.tokens_used,
                     )
+                elif task.status == TaskStatus.FAILED:
+                    # Оркестратор завершил failed (хард-таймаут и т.п.) — фиксируем в БД,
+                    # иначе watchdog продолжит видеть задачу как running.
+                    if not task.completed_at:
+                        task.completed_at = datetime.now()
+                    self._update_task_status_safe(
+                        task.id, "failed",
+                        completed_at=task.completed_at, error=task.error,
+                    )
                 
                 # Инкрементируем свободные workers
                 if pool == "interactive":

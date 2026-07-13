@@ -132,6 +132,21 @@ class Orchestrator:
         self._running = False
         self.log.info("Orchestrator stopped")
     
+    def _max_time_sec(self, complexity) -> int:
+        """Хард-лимит времени на задачу (сек) по сложности.
+
+        Применяется в handle_task через asyncio.wait_for — чтобы зависший
+        LLM-вызов (провайдер капает keepalive-байтами, обходя httpx read-timeout)
+        не повесил задачу на часы. На таймауте задача отменяется + юзеру идёт
+        '⏱️ превышен лимит времени'.
+        """
+        oc = self.config.orchestrator
+        if complexity == TaskComplexity.COMPLEX:
+            return oc.max_time_complex_min * 60
+        if complexity == TaskComplexity.MEDIUM:
+            return oc.max_time_medium_min * 60
+        return oc.max_time_simple_min * 60
+
     async def handle_task(self, task: Task) -> None:
         """Обработать задачу. Вызывается queue worker-ом."""
         self.log.info(f"Processing task {task.id}: '{task.user_message[:50]}...'")
@@ -186,8 +201,23 @@ class Orchestrator:
                 task.result = response
                 return
             
-            # Полный flow с LLM
-            response = await self._run_with_llm(task)
+            # Полный flow с LLM. Хард-таймаут: зависший LLM-вызов (keepalive от
+            # провайдера обходят httpx read-timeout) не должен вешать задачу на часы.
+            max_time_sec = self._max_time_sec(task.complexity)
+            timed_out = False
+            try:
+                response = await asyncio.wait_for(
+                    self._run_with_llm(task), timeout=max_time_sec
+                )
+            except asyncio.TimeoutError:
+                self.log.warning(
+                    f"Task {task.id}: hard timeout after {max_time_sec}s — cancelling"
+                )
+                response = (
+                    f"⏱️ Превышен лимит времени ({max_time_sec // 60} мин) — задача остановлена. "
+                    "Попробуй проще/короче, или разобью на части."
+                )
+                timed_out = True
             
             # Сохраняем ответ в историю
             if self.storage:
@@ -229,8 +259,10 @@ class Orchestrator:
                     )
                     await self.event_bus.emit(tg_chat_id, answer_ready(task.id, response))
             
-            task.status = TaskStatus.COMPLETED
+            task.status = TaskStatus.FAILED if timed_out else TaskStatus.COMPLETED
             task.result = response
+            if timed_out:
+                task.error = f"hard timeout {max_time_sec}s"
         
         except Exception as e:
             self.log.exception(f"Task {task.id} failed: {e}")

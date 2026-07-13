@@ -441,17 +441,35 @@ class LLMRouter:
         temperature: float = 0.7,
         max_tokens: int | None = None,
     ) -> LLMResponse:
-        """Вызвать умную LLM."""
-        return await self.smart.chat(messages, tools, temperature, max_tokens)
-    
+        """Вызвать умную LLM.
+
+        Хард-таймаут 180с поверх httpx: провайдер, капающий keepalive-байтами,
+        обходет read-timeout (120с) — asyncio.wait_for срубает вызов гарантированно.
+        """
+        import asyncio
+        try:
+            return await asyncio.wait_for(
+                self.smart.chat(messages, tools, temperature, max_tokens),
+                timeout=180,
+            )
+        except asyncio.TimeoutError:
+            raise RuntimeError("smart LLM: hard timeout 180s (provider hangs / keepalive)")
+
     async def cheap_chat(
         self,
         messages: list[LLMMessage],
         temperature: float = 0.3,
         max_tokens: int = 1000,
     ) -> LLMResponse:
-        """Вызвать дешёвую LLM."""
-        return await self.cheap.chat(messages, temperature=temperature, max_tokens=max_tokens)
+        """Вызвать дешёвую LLM (хард-таймаут 60с — см. smart_chat)."""
+        import asyncio
+        try:
+            return await asyncio.wait_for(
+                self.cheap.chat(messages, temperature=temperature, max_tokens=max_tokens),
+                timeout=60,
+            )
+        except asyncio.TimeoutError:
+            raise RuntimeError("cheap LLM: hard timeout 60s")
     
     async def extract_facts(self, dialog_text: str) -> list[dict]:
         """Дешёвая LLM извлекает факты из диалога (lazy consolidation).

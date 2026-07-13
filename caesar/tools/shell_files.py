@@ -639,11 +639,69 @@ def _paramiko_run(host: str, username: str, password: str, command: str, timeout
         client.close()
 
 
+class NetworkScanTool(Tool):
+    """Быстрый поиск машин в сети (ip neigh/arp + nmap -sn)."""
+
+    name = "network_scan"
+    description = (
+        "Быстро найти машины в локальной сети. Возвращает ip neigh/arp (известные хосты) "
+        "+ опц. nmap -sn (ping-sweep по подсети). Используй ЭТО для discovery, а не "
+        "медленный nmap-портскан. Если уже знаешь хост и есть креды — подключайся "
+        "remote_exec, НЕ сканируй сеть заново."
+    )
+    category = "shell_files"
+    parameters_schema = {
+        "type": "object",
+        "properties": {
+            "subnet": {"type": "string", "description": "Подсеть для nmap -sn, напр. 10.42.0.0/24 (опц.; без неё — только ip neigh/arp)", "default": ""},
+            "timeout": {"type": "integer", "description": "Таймаут сек (макс 120)", "default": 30},
+        },
+    }
+
+    async def execute(self, subnet: str = "", timeout: int = 30, **_) -> ToolResult:
+        # Валидация подсети — первой, чтобы инъекция отбивалась без subprocess.
+        if subnet and not re.fullmatch(r"[0-9./]+", subnet):
+            return ToolResult(success=False, error=f"invalid subnet: {subnet!r}")
+        timeout = min(max(timeout, 1), 120)
+        results: dict = {}
+
+        # 1) ARP-таблица — мгновенно, известные хосты (без сканирования).
+        try:
+            proc = await asyncio.create_subprocess_shell(
+                "(ip neigh || arp -a) 2>/dev/null",
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            out, _ = await asyncio.wait_for(proc.communicate(), timeout=10)
+            results["arp"] = out.decode("utf-8", errors="replace")
+        except Exception as e:
+            results["arp_error"] = str(e)
+
+        # 2) nmap -sn (ping-sweep) если задана валидная подсеть.
+        if subnet:
+            try:
+                proc = await asyncio.create_subprocess_shell(
+                    f"nmap -sn -T4 --max-retries 1 {subnet}",
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                out, _ = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+                results["nmap_sn"] = out.decode("utf-8", errors="replace")
+            except Exception as e:
+                results["nmap_sn_error"] = str(e)
+
+        return ToolResult(
+            success=True,
+            data={"scan": results, "hint": "arp = известные хосты; nmap -sn = ping-sweep по подсети"},
+        )
+
+
 def get_shell_files_tools() -> list[Tool]:
     """Все инструменты категории 1."""
     return [
         ShellExecTool(),
         RemoteExecTool(),
+        NetworkScanTool(),
         ReadFileTool(),
         WriteFileTool(),
         EditFileTool(),
