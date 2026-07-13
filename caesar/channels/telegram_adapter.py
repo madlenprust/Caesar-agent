@@ -19,7 +19,7 @@ from typing import Any
 
 import httpx
 
-from caesar.config import Config
+from caesar.config import CONFIG_DIR, Config
 from caesar.core.events import (
     EventBus,
     Event,
@@ -66,6 +66,40 @@ class TgSession:
         self._event_handler: Any = None
 
 
+def authorize_tg_message(
+    chat_id: int | None,
+    user_tg_id: int | None,
+    chat_type: str,
+    tg_config,
+) -> tuple[bool, str]:
+    """Решает, пускать ли сообщение. Возвращает (allowed, reason).
+
+    Чистая функция (без I/O) — тестируется unit-тестами. Привязка нового
+    владельца по коду — отдельный flow в _handle_message.
+
+    Политика:
+    - не привязан (allowed_chat_ids пуст) → открыт (opt-in, без abrupt-локаута);
+    - владелец (chat_id в allowed_chat_ids) → OK;
+    - группа + allow_group_chats: group_access all → OK; owner → только если
+      user_tg_id == owner_user_id (без повторной авторизации);
+    - иначе → отказ (в приват — с сообщением, в группе — молча).
+    """
+    allowed_ids = list(getattr(tg_config, "allowed_chat_ids", None) or [])
+    is_group = chat_type in ("group", "supergroup") or (chat_id is not None and chat_id < 0)
+    if not allowed_ids:
+        return True, "unpaired-open"
+    if chat_id in allowed_ids:
+        return True, "owner"
+    if is_group and getattr(tg_config, "allow_group_chats", False):
+        if getattr(tg_config, "group_access", "owner") == "all":
+            return True, "group-all"
+        owner_uid = getattr(tg_config, "owner_user_id", 0)
+        if owner_uid and user_tg_id == owner_uid:
+            return True, "group-owner"
+        return False, "group-not-owner"
+    return False, "not-owner"
+
+
 class TelegramAdapter:
     """Telegram-адаптер через Bot API (long polling)."""
     
@@ -89,6 +123,8 @@ class TelegramAdapter:
         self._last_documents: dict[int, dict] = {}
         # Session TTL — неактивные сессии старше этого (сек) удаляются
         self._session_ttl_seconds = 86400  # 24 часа
+        # chat_id, которым уже сказали "бот не привязан" (чтобы не спамить)
+        self._pairing_nagged: set = set()
         
         self._polling_task: asyncio.Task | None = None
         self._running = False
@@ -253,18 +289,56 @@ class TelegramAdapter:
         if not chat_id:
             return
 
-        # Авторизация (security, OPT-IN): если allowed_chat_ids задан — пускаем
-        # только перечисленные chat_id. Пустой список = бот работает как прежде
-        # (ничего не блокируется) — сознательный выбор, чтобы не запирать
-        # владельца из его же бота. Закрыть бота — заполни telegram.allowed_chat_ids.
-        allowed = getattr(self.config.telegram, "allowed_chat_ids", None)
-        if allowed and chat_id not in allowed:
-            self.log.warning(
-                f"TG auth: rejected chat_id={chat_id} user_tg={user_tg_id} "
-                f"text={text[:60]!r}"
-            )
-            await self._send_message(chat_id, "⛔ Доступ запрещён (chat_id не в allowed_chat_ids).")
+        # === Авторизация + привязка (security) ===
+        chat_type = message.get("chat", {}).get("type", "private")
+
+        # Привязка: если активен код (caesar pair записал файл) и текст совпал —
+        # привязываем отправителя как владельца.
+        pairing_file = CONFIG_DIR / "pairing_code"
+        if pairing_file.exists():
+            try:
+                code = pairing_file.read_text(encoding="utf-8").strip()
+            except Exception:
+                code = ""
+            if code and text.strip() == code:
+                allowed = list(self.config.telegram.allowed_chat_ids or [])
+                if chat_id not in allowed:
+                    allowed.append(chat_id)
+                    self.config.telegram.allowed_chat_ids = allowed
+                self.config.telegram.owner_user_id = user_tg_id or 0
+                try:
+                    self.config.save()
+                except Exception as e:
+                    self.log.error(f"Cannot save config after pairing: {e}")
+                try:
+                    pairing_file.unlink()
+                except Exception:
+                    pass
+                await self._send_message(chat_id, "✅ Привязан! Теперь принимаю только твои команды.")
+                self.log.info(f"TG paired: owner chat_id={chat_id} user_id={user_tg_id}")
+                return
+            # в режиме привязки — чужим не отвечаем командами
+            await self._send_message(chat_id, "🔒 Жду код привязки (он показан в терминале при `caesar pair`).")
             return
+
+        # Обычная авторизация (pure-функция — тестируется отдельно).
+        ok, reason = authorize_tg_message(chat_id, user_tg_id, chat_type, self.config.telegram)
+        if not ok:
+            if reason == "group-not-owner":
+                return  # в группе чужим молчим — без спама
+            self.log.warning(f"TG auth: rejected chat_id={chat_id} user_tg={user_tg_id} reason={reason}")
+            await self._send_message(chat_id, "⛔ Доступ запрещён — только владелец.")
+            return
+        if reason == "unpaired-open":
+            # бот не привязан: работаем открыто, но один раз нудим привязаться.
+            if chat_id not in self._pairing_nagged:
+                self._pairing_nagged.add(chat_id)
+                self.log.warning("TG: бот не привязан — работаю открыто. Запусти `caesar pair`.")
+                await self._send_message(
+                    chat_id,
+                    "🔒 Бот не привязан — сейчас работаю открыто (кто угодно с username может писать). "
+                    "Запусти на сервере `caesar pair`, чтобы закрыть.",
+                )
 
         # Создаём TG сессию сразу — чтобы /status и другие команды
         # видели активную сессию. Сессия = подписка на events.

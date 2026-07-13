@@ -25,7 +25,7 @@ from caesar.config import SOCKET_PATH
 
 # Команды management (не требуют daemon)
 MGMT_COMMANDS = {
-    "setup", "update", "rollback", "uninstall",
+    "setup", "update", "rollback", "uninstall", "pair",
     "permissions", "stats", "self-scan", "enable", "l3", "models", "cron",
     "skill", "doctor", "db", "kg", "config",
 }
@@ -322,6 +322,7 @@ Management команды (не требуют запущенного daemon):
   caesar update                   Обновить через git pull
   caesar rollback                 Откатиться к предыдущей версии
   caesar uninstall                Удалить Caesar
+  caesar pair                     Привязать бота к твоему Telegram (одноразовый код)
   caesar permissions list         Список разрешений
   caesar permissions revoke --pattern "..."   Отозвать разрешение
   caesar permissions reset        Сбросить все разрешения

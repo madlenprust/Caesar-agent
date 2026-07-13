@@ -83,9 +83,19 @@ class TelegramConfig:
     mtproto_api_id: str = ""
     mtproto_api_hash: str = ""
     # Авторизация: список chat_id, которым разрешено пользоваться ботом.
-    # Пустой список = fail-closed (никто не допущен, пока владелец не впишет свой
-    # chat_id). Чтобы узнать свой chat_id — напиши боту, он ответит в отказе.
+    # Заполняется при привязке (caesar pair) — владелец шлёт код боту, бот
+    # записывает chat_id сюда. Пустой = бот не привязан (работает открыто +
+    # ворнит «запусти caesar pair», без abrupt-локаута).
     allowed_chat_ids: list[int] = field(default_factory=list)
+    # user_id владельца (TG user, не chat_id) — для распознавания владельца
+    # внутри групп (где chat_id — отрицательный id группы).
+    owner_user_id: int = 0
+    # Группы: False (дефолт) — группы игнорируются; True — бот отвечает в группе.
+    allow_group_chats: bool = False
+    # Кто может командовать в группе (при allow_group_chats=True):
+    #   "owner" — только владелец (по user_id), без повторной авторизации
+    #   "all"   — любой участник группы (открытый супер-чат)
+    group_access: str = "owner"
 
 
 @dataclass

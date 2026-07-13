@@ -752,6 +752,58 @@ async def cmd_stats(args) -> int:
     return 0
 
 
+async def cmd_pair(args) -> int:
+    """Привязать бота к Telegram-аккаунту владельца.
+
+    Генерирует одноразовый код, показывает его в терминале и ждёт, пока
+    владелец не пришлёт код боту в Telegram. Бот, получив код, записывает
+    chat_id/user_id владельца в config и начинает принимать только его
+    команды. После привязки бот закрыт для всех, кроме владельца (и, опционально,
+    групп — см. allow_group_chats / group_access).
+    """
+    import secrets
+    import time
+
+    from caesar.config import CONFIG_DIR, CONFIG_PATH, SOCKET_PATH
+    from caesar.config import Config
+
+    if not SOCKET_PATH.exists():
+        print("⚠️  Caesar daemon не запущен — бот не получит код.")
+        print("   Сначала: systemctl --user start caesar-daemon")
+        print("   (потом запусти caesar pair снова)\n")
+        return 1
+
+    code = f"{secrets.randbelow(1000000):06d}"
+    pairing_file = CONFIG_DIR / "pairing_code"
+    pairing_file.parent.mkdir(parents=True, exist_ok=True)
+    pairing_file.write_text(code, encoding="utf-8")
+
+    print("\n🔐 Режим привязки.")
+    print(f"   Отправь этот код боту в Telegram:  {code}")
+    print("   (у тебя 5 минут; бот должен быть запущен)")
+    print("   После привязки бот принимает только твои команды.\n")
+
+    deadline = time.time() + 300
+    while time.time() < deadline:
+        await asyncio.sleep(2)
+        cfg = Config.load(CONFIG_PATH)
+        if cfg.telegram.allowed_chat_ids:
+            cid = cfg.telegram.allowed_chat_ids[0]
+            print(f"✅ Привязан! chat_id={cid}. Бот теперь принимает только твои команды.")
+            try:
+                pairing_file.unlink()
+            except Exception:
+                pass
+            return 0
+
+    print("⏱ Таймаут — код не был отправлен боту. Попроби снова: caesar pair")
+    try:
+        pairing_file.unlink()
+    except Exception:
+        pass
+    return 1
+
+
 async def cmd_setup(args) -> int:
     """Запустить setup wizard."""
     from caesar.setup import run_setup
@@ -2769,6 +2821,9 @@ async def main_async() -> int:
     # uninstall
     p_uninstall = subparsers.add_parser("uninstall", help="Удалить агент")
     p_uninstall.add_argument("-y", "--yes", action="store_true", help="Без подтверждения")
+
+    # pair — привязка бота к Telegram-аккаунту владельца (одноразовый код)
+    subparsers.add_parser("pair", help="Привязать бота к твоему Telegram (одноразовый код)")
     p_uninstall.add_argument("--keep-data", action="store_true", help="Сохранить данные")
     
     # permissions
@@ -2868,6 +2923,9 @@ async def main_async() -> int:
         return await cmd_rollback(args)
     elif args.command == "uninstall":
         return await cmd_uninstall(args)
+    elif args.command == "pair":
+        setup_logging()
+        return await cmd_pair(args)
     elif args.command == "permissions":
         setup_logging()
         return await cmd_permissions(args)

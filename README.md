@@ -47,9 +47,10 @@ curl -fsSL https://raw.githubusercontent.com/madlenprust/Caesar-agent/main/insta
 3. Напиши боту — он возьмёт задачу и вернёт результат. Прогресс виден как
    карточка с эмодзи; в финале карточка заменяется ответом.
 
-> **Безопасность:** по умолчанию бот отвечает всем, кто знает username. Чтобы
-> пускать только себя — впиши свой `chat_id` в `telegram.allowed_chat_ids` в
-> `config.yaml` (бот покажет твой chat_id в отказе, если напишешь ему).
+> **Безопасность:** после установки запусти `caesar pair` — терминал покажет
+> одноразовый код, ты отправишь его боту в Telegram, и бот начнёт принимать
+> команды **только от тебя**. Группы — опционально (`allow_group_chats` +
+> `group_access` в `config.yaml`: `owner` — только ты в группе, `all` — все).
 
 ### CLI
 ```bash
@@ -62,6 +63,7 @@ caesar --help                     # справка
 ### Управление
 ```bash
 caesar setup          # переконфигурировать (LLM, TG, режим)
+caesar pair           # привязать бота к твоему Telegram (одноразовый код)
 caesar update         # обновить через git pull
 caesar rollback       # откат к предыдущей версии
 caesar status         # статус
