@@ -15,6 +15,7 @@
 
 import asyncio
 import json
+import re
 from datetime import datetime
 from caesar.config import Config
 from caesar.core.events import (
@@ -146,6 +147,17 @@ class Orchestrator:
         if complexity == TaskComplexity.MEDIUM:
             return oc.max_time_medium_min * 60
         return oc.max_time_simple_min * 60
+
+    # Признаки "обещания действия" — LLM сказала, что сделает, но не вызвала инструмент.
+    _ACTION_INTENT_RE = re.compile(
+        r"\b(найд[уё]|сделаю|выполню|подключусь|проверю|запущу|установлю|настрою|"
+        r"посмотрю|открою|скачаю|запрошу|опрошу|попробую|приступаю)\b",
+        re.IGNORECASE,
+    )
+
+    def _looks_like_action_intent(self, text: str) -> bool:
+        """True если текст похож на обещание действия ('найду все машины', 'сделаю X')."""
+        return bool(self._ACTION_INTENT_RE.search(text or ""))
 
     async def handle_task(self, task: Task) -> None:
         """Обработать задачу. Вызывается queue worker-ом."""
@@ -664,15 +676,13 @@ class Orchestrator:
         # Добавляем текущий запрос пользователя (с ограничением длины)
         messages.append(LLMMessage(role="user", content=user_msg))
         
-        # Схемы инструментов — adaptive: только релевантные
-        # Экономия: ~4000 → ~1200 токенов (34 → 8-12 инструментов)
-        needs_tools = analysis.get("needs_tools", True)
-        if needs_tools:
-            tool_schemas = self.tools.get_schemas_smart(task.user_message)
-            self.log.info(f"Tool schemas: {len(tool_schemas)} tools selected (adaptive)")
-        else:
-            tool_schemas = None
-            self.log.info(f"Skipping tool schemas — analyzer says no tools needed (-4000 tokens)")
+        # Инструменты — ВСЕГДА (adaptive, ~1200 токенов). Раньше analyzer мог
+        # снять их (needs_tools=false) — агент "разоружался": говорил "найду/сделаю",
+        # но без инструментов не мог действовать (главная болезнь "остановки на
+        # полпути"). Тривиальные сообщения (привет/спасибо) уходят ранним return
+        # выше (is_trivial + trivial_response) и не платят за схемы.
+        tool_schemas = self.tools.get_schemas_smart(task.user_message)
+        self.log.info(f"Tool schemas: {len(tool_schemas)} tools (always on — no disarm)")
         
         max_steps = self._get_max_steps(effective_complexity)
         max_tokens = self._get_max_tokens(effective_complexity)
@@ -792,6 +802,22 @@ class Orchestrator:
                     role="user",
                     content="(продолжай — вызови инструмент или дай финальный ответ)",
                 ))
+                continue
+
+            # Self-poke: LLM вернула ТЕКСТ-обещание действия ("найду/сделаю/подключусь")
+            # без tool-call и ничего ещё не сделала — не сдаёмся как "финальный ответ",
+            # а пинаем саму себя действовать. Это лечение "агент сказал — не сделал".
+            if (not resp.tool_calls and (resp.content or "").strip()
+                    and not has_used_tools and step <= 2
+                    and len(resp.content) < 200
+                    and self._looks_like_action_intent(resp.content)):
+                messages.append(LLMMessage(role="assistant", content=resp.content))
+                messages.append(LLMMessage(
+                    role="user",
+                    content="(ты сказал, что сделаешь — вызови нужный инструмент и сделай, "
+                            "не описывай словами. Например remote_exec/network_scan/shell_exec.)",
+                ))
+                self.log.info(f"Self-poke: response looks like action-intent, nudging to act (step {step})")
                 continue
             
             # Если есть tool_calls — выполняем
