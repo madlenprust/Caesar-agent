@@ -163,6 +163,7 @@ CREATE TABLE IF NOT EXISTS l4_skills (
     last_success TIMESTAMP,
     success_count INTEGER DEFAULT 0,
     failure_count INTEGER DEFAULT 0,
+    consecutive_failures INTEGER DEFAULT 0,  -- 3 подряд → broken (не lifetime)
     version INTEGER DEFAULT 1,
     needs_validation INTEGER DEFAULT 0,
     broken INTEGER DEFAULT 0,
@@ -328,7 +329,16 @@ class Storage:
                     self.log.info("Migration: added original_directive column to tasks table")
             except Exception as e:
                 self.log.warning(f"Migration original_directive failed: {e}")
-            
+
+            # Миграция: добавляем consecutive_failures колонку в l4_skills
+            try:
+                l4_columns = [row["name"] for row in conn.execute("PRAGMA table_info(l4_skills)").fetchall()]
+                if "consecutive_failures" not in l4_columns:
+                    conn.execute("ALTER TABLE l4_skills ADD COLUMN consecutive_failures INTEGER DEFAULT 0")
+                    self.log.info("Migration: added consecutive_failures column to l4_skills table")
+            except Exception as e:
+                self.log.warning(f"Migration consecutive_failures failed: {e}")
+
             # Миграция: добавляем индексы для скорости /status
             try:
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_created_at ON tasks(created_at DESC)")

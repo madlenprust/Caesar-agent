@@ -82,6 +82,8 @@ class Task:
     waiting_question: str | None = None
     waiting_since: datetime | None = None
 
+    cancelled: bool = False  # /stop — оркестратор и worker проверяют этот флаг
+
 
 class TaskQueue:
     """Очередь задач с двумя пулами workers.
@@ -280,11 +282,26 @@ class TaskQueue:
                     self.log.warning(f"Task {task_id} not found, skipping")
                     queue.task_done()
                     continue
-                
+
+                # /stop мог прийти, пока задача ждала в очереди — не resurrect'им.
+                if getattr(task, "cancelled", False):
+                    task.status = TaskStatus.FAILED
+                    task.error = task.error or "Остановлено до запуска (/stop)"
+                    task.completed_at = datetime.now()
+                    self._update_task_status_safe(
+                        task.id, "failed",
+                        completed_at=task.completed_at, error=task.error,
+                    )
+                    queue.task_done()
+                    self.log.info(f"Task {task_id} cancelled before start")
+                    continue
+
                 # Обновляем статус
                 task.status = TaskStatus.RUNNING
                 task.started_at = datetime.now()
                 task.worker_id = f"{pool}-{worker_id}"
+                # Пишем в БД, чтобы watchdog видел running-задачи.
+                self._persist_task(task)
                 
                 # Декрементируем свободные workers
                 if pool == "interactive":
@@ -306,11 +323,32 @@ class TaskQueue:
                         task.status = TaskStatus.FAILED
                         task.error = str(e)
                         task.completed_at = datetime.now()
+                        self._update_task_status_safe(
+                            task.id, "failed",
+                            completed_at=task.completed_at, error=task.error,
+                        )
                 
                 # Отмечаем завершение
-                if task.status == TaskStatus.RUNNING:
+                if getattr(task, "cancelled", False):
+                    # /stop во время выполнения — оркестратор вышел по флагу.
+                    task.status = TaskStatus.FAILED
+                    if not task.completed_at:
+                        task.completed_at = datetime.now()
+                    if not task.error:
+                        task.error = "Остановлено пользователем (/stop)"
+                    self._update_task_status_safe(
+                        task.id, "failed",
+                        completed_at=task.completed_at, error=task.error,
+                    )
+                elif task.status == TaskStatus.RUNNING:
                     task.status = TaskStatus.COMPLETED
                     task.completed_at = datetime.now()
+                    # Пишем результат в БД — для cron re-delivery и истории.
+                    self._update_task_status_safe(
+                        task.id, "completed",
+                        completed_at=task.completed_at,
+                        result=task.result, tokens_used=task.tokens_used,
+                    )
                 
                 # Инкрементируем свободные workers
                 if pool == "interactive":
@@ -512,3 +550,50 @@ class TaskQueue:
         
         self.log.info(f"Persisted {saved}/{len(unfinished)} unfinished task(s) to DB")
         return saved
+
+    def _persist_task(self, task: Task) -> None:
+        """Сохранить текущее состояние задачи в БД (INSERT OR REPLACE).
+
+        Без этого watchdog слеп (таблица tasks пуста): не видит зависшие задачи
+        и не может re-delivery cron-результаты. Вызывается на RUNNING и при
+        завершении. Ошибки БД не валят worker.
+        """
+        if not getattr(self, "_storage", None):
+            return
+        try:
+            self._storage.save_task({
+                "id": task.id,
+                "user_id": task.user_id,
+                "channel_id": task.channel_id,
+                "author_id": task.author_id,
+                "source": task.source,
+                "source_chat_id": task.source_chat_id,
+                "user_message": task.user_message,
+                "original_directive": task.original_directive,
+                "status": task.status.value if hasattr(task.status, "value") else str(task.status),
+                "priority": task.priority.value,
+                "complexity": task.complexity.value if hasattr(task.complexity, "value") else str(task.complexity),
+                "created_at": task.created_at.isoformat() if task.created_at else None,
+                "started_at": task.started_at.isoformat() if task.started_at else None,
+                "completed_at": task.completed_at.isoformat() if task.completed_at else None,
+                "worker_id": task.worker_id,
+                "current_step": task.current_step,
+                "tokens_used": task.tokens_used,
+                "cost_rub": task.cost_rub,
+                "result": task.result,
+                "error": task.error,
+                "retry_count": task.retry_count,
+                "waiting_question": task.waiting_question,
+                "waiting_since": task.waiting_since.isoformat() if task.waiting_since else None,
+            })
+        except Exception as e:
+            self.log.debug(f"Cannot persist task {task.id}: {e}")
+
+    def _update_task_status_safe(self, task_id: str, status: str, **extra) -> None:
+        """Обновить статус задачи в БД, не роняя worker при ошибке."""
+        if not getattr(self, "_storage", None):
+            return
+        try:
+            self._storage.update_task_status(task_id, status, **extra)
+        except Exception as e:
+            self.log.debug(f"Cannot update task status {task_id}->{status}: {e}")

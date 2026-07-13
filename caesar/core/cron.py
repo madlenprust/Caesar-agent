@@ -254,11 +254,21 @@ class CronScheduler:
         
         self.log.info(f"Cron firing: {cron_id} '{d['task_to_execute'][:50]}...'")
         
-        # Проверяем quiet hours — если сейчас тихие часы, холдим
+        # Проверяем quiet hours — если сейчас тихие часы, переносим firing
+        # на конец тихих часов (DEFERRED), а не теряем задачу. В конце quiet
+        # _fire_cron_impl запустится снова, _is_quiet_hours() уже False → выполнится.
         if self._is_quiet_hours():
-            self.log.info(f"Cron {cron_id} held — quiet hours")
-            # Сохраняем в held notifications
-            await self._hold_notification(d)
+            run_at = self._next_quiet_end_datetime()
+            self.log.info(f"Cron {cron_id} deferred — quiet hours, rescheduled to {run_at.isoformat()}")
+            try:
+                if self._scheduler:
+                    self._scheduler.add_job(
+                        self._fire_cron_impl, "date",
+                        args=[cron_id], run_date=run_at,
+                        id=f"{cron_id}:deferred", replace_existing=True,
+                    )
+            except Exception as e:
+                self.log.warning(f"Cron {cron_id}: cannot defer ({e}); will fire next cycle")
             return
         
         # ВАЖНО: source_chat_id для задачи должен быть Telegram chat_id
@@ -376,6 +386,21 @@ class CronScheduler:
                 return now >= start or now <= end
         except Exception:
             return False
+
+    def _next_quiet_end_datetime(self) -> "datetime":
+        """Ближайший момент окончания тихих часов (для deferred-переноса cron).
+
+        Если сегодня end уже прошёл, а мы всё ещё в quiet (cross-midnight:
+        сейчас 23:30, end 08:00) — берём завтрашний end.
+        """
+        from datetime import datetime, timedelta
+        end_str = getattr(self.config.cron, "quiet_hours_end", "08:00")
+        end_h, end_m = map(int, end_str.split(":"))
+        now = datetime.now()
+        end_today = now.replace(hour=end_h, minute=end_m, second=0, microsecond=0)
+        if end_today <= now:
+            return end_today + timedelta(days=1)
+        return end_today
     
     async def _hold_notification(self, cron_task: dict) -> None:
         """Сохранить отложенное уведомление для morning briefing."""

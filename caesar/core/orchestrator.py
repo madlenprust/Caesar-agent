@@ -656,7 +656,12 @@ class Orchestrator:
         }
         for step in range(1, max_steps + 1):
             task.current_step = step
-            
+
+            # /stop ставит task.cancelled — выходим сразу, не дожигая токены.
+            if getattr(task, "cancelled", False):
+                await emit_progress("⏹️")
+                return "⏹️ Остановлено пользователем."
+
             # Лимит токенов — мягкое предупреждение, НЕ прерываем сразу.
             # Если LLM в середине работы (были tool calls), даём ей закончить
             # текущую цепочку и ответить. Жёстко прерываем только если токенов

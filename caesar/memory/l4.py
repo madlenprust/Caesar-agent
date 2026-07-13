@@ -107,7 +107,11 @@ class L4Skills:
         self._sync_from_yaml()
     
     def _sync_from_yaml(self) -> None:
-        """Загрузить все YAML-файлы в SQLite."""
+        """Загрузить все YAML-файлы в SQLite.
+
+        Пропускает неизменившиеся скиллы — иначе version inflate на каждом
+        рестарте демона (upsert_skill делает version+1 на каждом ON CONFLICT).
+        """
         count = 0
         for yaml_file in self.skills_dir.glob("*.yaml"):
             try:
@@ -116,11 +120,39 @@ class L4Skills:
                 if not data or "name" not in data:
                     continue
                 data["yaml_path"] = str(yaml_file)
+                existing = self.storage.get_skill(data["name"])
+                if existing and self._skill_content_unchanged(existing, data):
+                    count += 1
+                    continue
                 self.storage.upsert_skill(data)
                 count += 1
             except Exception as e:
                 self.log.warning(f"Cannot load skill {yaml_file}: {e}")
         self.log.info(f"Loaded {count} skills from YAML")
+
+    @staticmethod
+    def _skill_content_unchanged(existing: dict, new: dict) -> bool:
+        """Совпадает ли содержимое скилла (без учёта runtime-статистики).
+
+        existing — из БД (prerequisites/exact_recipe — JSON-строки),
+        new — из YAML (list). Нормализуем оба к объектам для структурного сравнения.
+        """
+        def norm(d: dict, f: str):
+            v = d.get(f)
+            if v is None:
+                # в YAML ключ может отсутствовать — это то же, что дефолт upsert'а
+                return [] if f in ("prerequisites", "exact_recipe", "anti_patterns", "pitfalls") else ""
+            if isinstance(v, str):
+                try:
+                    return json.loads(v)
+                except Exception:
+                    return v
+            return v
+        for f in ("trigger", "prerequisites", "exact_recipe", "anti_patterns",
+                  "pitfalls", "example", "notes"):
+            if norm(existing, f) != norm(new, f):
+                return False
+        return True
     
     def save_skill(self, skill: Skill, write_yaml: bool = True) -> None:
         """Сохранить скилл в SQLite и (опционально) в YAML."""
@@ -196,18 +228,22 @@ class L4Skills:
             """, (name,))
     
     def record_failure(self, name: str, error: str) -> None:
-        """Отметить неудачу."""
+        """Отметить неудачу. 3 ПОДРЯД (не суммарно) → broken.
+
+        record_success сбрасывает consecutive_failures в 0, так что скилл ломается
+        только после 3 провалов без успеха между ними (PRINCIPLES «3 подряд»).
+        """
         with self.storage._conn() as conn:
             conn.execute("""
-                UPDATE l4_skills SET 
-                    failure_count = failure_count + 1
+                UPDATE l4_skills SET
+                    failure_count = failure_count + 1,
+                    consecutive_failures = consecutive_failures + 1
                 WHERE name = ?
             """, (name,))
-            # Если 3 неудачи подряд — помечаем broken
             row = conn.execute(
-                "SELECT failure_count, success_count FROM l4_skills WHERE name = ?", (name,)
+                "SELECT consecutive_failures FROM l4_skills WHERE name = ?", (name,)
             ).fetchone()
-            if row and row["failure_count"] >= 3:
+            if row and row["consecutive_failures"] >= 3:
                 conn.execute("UPDATE l4_skills SET broken = 1 WHERE name = ?", (name,))
     
     def add_anti_pattern(self, name: str, error: str, source_msg_id: str | None = None) -> None:

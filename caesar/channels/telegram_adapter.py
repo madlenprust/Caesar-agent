@@ -2030,6 +2030,7 @@ class TelegramAdapter:
                     try:
                         from caesar.core.queue import TaskStatus
                         task.status = TaskStatus.FAILED
+                        task.cancelled = True
                         task.error = "Остановлено пользователем (/stop)"
                         stopped_count += 1
                         self.log.info(f"Stopped task {task.id}: '{task.user_message[:50]}...'")
