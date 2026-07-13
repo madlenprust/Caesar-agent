@@ -504,16 +504,18 @@ class GrepTool(Tool):
 class RemoteExecTool(Tool):
     """Выполнить команду на соседней машине через SSH.
 
-    Удобно в god mode: агент может чинить/диагностировать другие машины по
-    сети (как OpenClaw чинил Caesar с соседней машины). Требует настроенный
-    SSH-доступ (ключи) с этой машины к удалённой.
+    В god mode: агент может чинить/диагностировать другие машины по сети (как
+    OpenClaw чинил Caesar с соседней машины). Если есть SSH-ключ — использует
+    его. Если ключа нет — СПРАШИВАЕТ у пользователя пароль (через чат) и ходит
+    по паролю (paramiko — пароль не светится в `ps`, в отличие от sshpass -p).
     """
 
     name = "remote_exec"
     description = (
-        "Выполнить команду на удалённой машине через SSH. Нужен host и command "
-        "(опц. user). Возвращает stdout/stderr/exit_code. Требует настроенный "
-        "SSH-ключ с этой машины. В sandboxed требует подтверждения; в god/full — выполняет."
+        "Выполнить команду на удалённой машине через SSH. Если есть SSH-ключ — "
+        "не передавай password. Если ключа НЕТ — спроси у пользователя пароль от "
+        "машины и передай в password. Возвращает stdout/stderr/exit_code. "
+        "В sandboxed запрещён; в god/full — выполняет. Пароль не логируется."
     )
     category = "shell_files"
     access_mode: str = "sandboxed"
@@ -524,13 +526,14 @@ class RemoteExecTool(Tool):
             "host": {"type": "string", "description": "Хост (ip или имя)"},
             "command": {"type": "string", "description": "Команда на удалённой машине"},
             "user": {"type": "string", "description": "SSH user (по умолч. текущий)", "default": ""},
+            "password": {"type": "string", "description": "Пароль (только если нет SSH-ключа; спроси у пользователя)", "default": ""},
             "timeout": {"type": "integer", "description": "Таймаут сек (макс 300)", "default": 60},
         },
         "required": ["host", "command"],
     }
 
     async def execute(self, host: str, command: str, user: str = "",
-                      timeout: int = 60, **_) -> ToolResult:
+                      password: str = "", timeout: int = 60, **_) -> ToolResult:
         if not host or not command:
             return ToolResult(success=False, error="host и command обязательны")
         # В sandboxed (без god) — не выполняем удалённые команды.
@@ -541,44 +544,82 @@ class RemoteExecTool(Tool):
                       "В sandboxed удалённое выполнение запрещено.",
             )
         timeout = min(max(timeout, 1), 300)
-        target = f"{user}@{host}" if user else host
-        ssh_cmd = [
-            "ssh",
-            "-o", "BatchMode=yes",                       # без интерактивного ввода пароля
-            "-o", "StrictHostKeyChecking=accept-new",   # первый раз принимаем ключ
-            "-o", f"ConnectTimeout={min(timeout, 15)}",
-            target,
-            command,
-        ]
         try:
-            proc = await asyncio.create_subprocess_exec(
-                *ssh_cmd,
-                stdout=asyncio.subprocess.PIPE,
-                stderr=asyncio.subprocess.PIPE,
-            )
-            try:
-                stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
-            except asyncio.TimeoutError:
-                proc.kill()
-                await proc.wait()
-                return ToolResult(success=False, error=f"Timeout after {timeout}s",
-                                   data={"timeout": True, "host": host})
-            out = stdout.decode("utf-8", errors="replace")
-            err = stderr.decode("utf-8", errors="replace")
+            if password:
+                # password-SSH через paramiko (в потоке — не блокирует event loop).
+                # Пароль НЕ логируется и не попадает в process args (в отличие от sshpass -p).
+                rc, out, err = await asyncio.to_thread(
+                    _paramiko_run, host, user, password, command, timeout
+                )
+            else:
+                # key-based через subprocess ssh.
+                target = f"{user}@{host}" if user else host
+                ssh_cmd = [
+                    "ssh",
+                    "-o", "BatchMode=yes",                       # без интерактивного пароля
+                    "-o", "StrictHostKeyChecking=accept-new",
+                    "-o", f"ConnectTimeout={min(timeout, 15)}",
+                    target,
+                    command,
+                ]
+                proc = await asyncio.create_subprocess_exec(
+                    *ssh_cmd,
+                    stdout=asyncio.subprocess.PIPE,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                try:
+                    stdout, stderr = await asyncio.wait_for(proc.communicate(), timeout=timeout)
+                except asyncio.TimeoutError:
+                    proc.kill()
+                    await proc.wait()
+                    return ToolResult(success=False, error=f"Timeout after {timeout}s",
+                                       data={"timeout": True, "host": host})
+                out = stdout.decode("utf-8", errors="replace")
+                err = stderr.decode("utf-8", errors="replace")
+                rc = proc.returncode
             if len(out) > 50000:
                 out = out[:50000] + f"\n... (truncated, {len(out)} total)"
             return ToolResult(
-                success=proc.returncode == 0,
-                data={"stdout": out, "stderr": err, "exit_code": proc.returncode,
+                success=rc == 0,
+                data={"stdout": out, "stderr": err, "exit_code": rc,
                       "host": host, "user": user or None},
-                error=None if proc.returncode == 0 else f"Exit code {proc.returncode}",
+                error=None if rc == 0 else f"Exit code {rc}",
             )
+        except ImportError:
+            return ToolResult(success=False, error="password-SSH требует paramiko: pip install paramiko")
         except Exception as e:
-            return ToolResult(success=False, error=f"remote_exec failed: {e}")
+            # Пароль может оказаться в сообщении исключения — маскируем его.
+            msg = str(e)
+            if password and password in msg:
+                msg = msg.replace(password, "***")
+            return ToolResult(success=False, error=f"remote_exec failed: {type(e).__name__}: {msg[:200]}")
 
     def requires_permission(self, host: str = "", command: str = "", **_) -> bool:
         # удалённое выполнение всегда потенциально опасно — в sandboxed спросим
         return True
+
+
+def _paramiko_run(host: str, username: str, password: str, command: str, timeout: int) -> tuple[int, str, str]:
+    """Синхронный SSH с паролем через paramiko. Запускается в потоке (asyncio.to_thread)."""
+    import paramiko
+    client = paramiko.SSHClient()
+    client.set_missing_host_key_policy(paramiko.AutoAddPolicy())
+    client.connect(
+        hostname=host,
+        username=username or None,
+        password=password,
+        timeout=min(timeout, 15),
+        look_for_keys=False,
+        allow_agent=False,
+    )
+    try:
+        _stdin, stdout, stderr = client.exec_command(command, timeout=timeout)
+        out = stdout.read().decode("utf-8", errors="replace")
+        err = stderr.read().decode("utf-8", errors="replace")
+        rc = stdout.channel.recv_exit_status()
+        return rc, out, err
+    finally:
+        client.close()
 
 
 def get_shell_files_tools() -> list[Tool]:

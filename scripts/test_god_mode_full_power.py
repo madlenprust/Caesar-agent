@@ -64,3 +64,30 @@ async def test_remote_exec_god_bypasses_gate():
         r = await t.execute(host="neighbor", command="echo hi", timeout=5)
     assert r.success
     assert r.data["stdout"] == "hi\n"
+
+
+async def test_remote_exec_password_path_uses_paramiko():
+    """password → paramiko (мок _paramiko_run); пароль не доходит до subprocess."""
+    t = RemoteExecTool()
+    t.access_mode = "sandboxed"
+    t.god_mode = True
+    with patch("caesar.tools.shell_files._paramiko_run", return_value=(0, "hello\n", "")) as mock_run:
+        r = await t.execute(host="neighbor", command="echo hello", password="s3cret", timeout=5)
+    assert r.success
+    assert r.data["stdout"] == "hello\n"
+    mock_run.assert_called_once()  # paramiko path, not subprocess ssh
+    # пароль не утёк в результат
+    assert "s3cret" not in str(r.data) and "s3cret" not in (r.error or "")
+
+
+async def test_remote_exec_password_failure_does_not_leak_password():
+    t = RemoteExecTool()
+    t.access_mode = "sandboxed"
+    t.god_mode = True
+    def _raise(*a, **k):
+        raise RuntimeError("auth failed for s3cret")
+    with patch("caesar.tools.shell_files._paramiko_run", side_effect=_raise):
+        r = await t.execute(host="n", command="x", password="s3cret", timeout=5)
+    assert not r.success
+    assert "s3cret" not in (r.error or "")  # пароль замаскирован
+    assert "***" in r.error  # и сообщение об ошибке осталось информативным
