@@ -124,6 +124,12 @@ class TelegramAdapter:
         if not self.bot_token:
             self.log.info("Telegram disabled (no bot_token configured)")
             return
+
+        if not getattr(self.config.telegram, "allowed_chat_ids", None):
+            self.log.warning(
+                "TG: allowed_chat_ids пуст — бот открыт (любой знающий username "
+                "может писать). Чтобы закрыть — telegram.allowed_chat_ids в config.yaml."
+            )
         
         # Проверяем токен
         me = await self._api_call("getMe")
@@ -247,21 +253,17 @@ class TelegramAdapter:
         if not chat_id:
             return
 
-        # Авторизация (security): бот не открыт кому попало.
-        # allowed_chat_ids пуст = fail-closed — никто не допущен, пока владелец
-        # не впишет свой chat_id. В отказе бот показывает chat_id, чтобы владелец
-        # узнал его и добавил в config.yaml → telegram.allowed_chat_ids.
+        # Авторизация (security, OPT-IN): если allowed_chat_ids задан — пускаем
+        # только перечисленные chat_id. Пустой список = бот работает как прежде
+        # (ничего не блокируется) — сознательный выбор, чтобы не запирать
+        # владельца из его же бота. Закрыть бота — заполни telegram.allowed_chat_ids.
         allowed = getattr(self.config.telegram, "allowed_chat_ids", None)
-        if not allowed or chat_id not in allowed:
+        if allowed and chat_id not in allowed:
             self.log.warning(
                 f"TG auth: rejected chat_id={chat_id} user_tg={user_tg_id} "
-                f"text={text[:60]!r} (allowed={'empty' if not allowed else 'set'})"
+                f"text={text[:60]!r}"
             )
-            await self._send_message(
-                chat_id,
-                f"⛔ Доступ запрещён. Твой chat_id: {chat_id}.\n"
-                f"Добавь его в config.yaml → telegram.allowed_chat_ids и перезапусти Caesar.",
-            )
+            await self._send_message(chat_id, "⛔ Доступ запрещён (chat_id не в allowed_chat_ids).")
             return
 
         # Создаём TG сессию сразу — чтобы /status и другие команды
