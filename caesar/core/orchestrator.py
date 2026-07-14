@@ -213,23 +213,53 @@ class Orchestrator:
                 task.result = response
                 return
             
-            # Полный flow с LLM. Хард-таймаут: зависший LLM-вызов (keepalive от
-            # провайдера обходят httpx read-timeout) не должен вешать задачу на часы.
+            # Полный flow с LLM. Хард-таймаут + TASK-LEVEL RETRY: транзиентные
+            # ошибки (LLM disconnect, timeout) не должны оставлять пользователя с
+            # обрубком «Ошибка LLM» — даём задаче ещё попытки (watchdog/heartbeat,
+            # который возобновляет, а не сдаётся на полу-ответе).
             max_time_sec = self._max_time_sec(task.complexity)
+            MAX_TASK_RETRIES = 2
+            response = ""
             timed_out = False
-            try:
-                response = await asyncio.wait_for(
-                    self._run_with_llm(task), timeout=max_time_sec
-                )
-            except asyncio.TimeoutError:
-                self.log.warning(
-                    f"Task {task.id}: hard timeout after {max_time_sec}s — cancelling"
-                )
-                response = (
-                    f"⏱️ Превышен лимит времени ({max_time_sec // 60} мин) — задача остановлена. "
-                    "Попробуй проще/короче, или разобью на части."
-                )
-                timed_out = True
+            task_failed = False
+            last_err = None
+            for task_attempt in range(MAX_TASK_RETRIES + 1):
+                timed_out = False
+                try:
+                    response = await asyncio.wait_for(
+                        self._run_with_llm(task), timeout=max_time_sec
+                    )
+                    last_err = None
+                    break  # успех — выходим из retry-цикла
+                except asyncio.TimeoutError:
+                    last_err = "timeout"
+                    self.log.warning(
+                        f"Task {task.id}: hard timeout after {max_time_sec}s "
+                        f"(attempt {task_attempt + 1}/{MAX_TASK_RETRIES + 1})"
+                    )
+                except Exception as e:
+                    last_err = f"{type(e).__name__}: {str(e)[:150]}"
+                    self.log.warning(
+                        f"Task {task.id}: attempt {task_attempt + 1}/{MAX_TASK_RETRIES + 1} "
+                        f"failed: {last_err}"
+                    )
+                if task_attempt < MAX_TASK_RETRIES:
+                    await asyncio.sleep(5)  # backoff перед следующей попыткой
+            else:
+                # все попытки провалились → финальный ответ-ошибка (один, не обрубок)
+                if last_err == "timeout":
+                    response = (
+                        f"⏱️ Превышен лимит времени ({max_time_sec // 60} мин) — задача остановлена. "
+                        "Попробуй проще/короче, или разобью на части."
+                    )
+                    timed_out = True
+                else:
+                    response = (
+                        f"⚠️ Не получилось выполнить задачу (после {MAX_TASK_RETRIES + 1} попыток): "
+                        f"{last_err}"
+                    )
+                    task_failed = True
+                    task.error = last_err
             
             # Сохраняем ответ в историю
             if self.storage:
@@ -271,9 +301,9 @@ class Orchestrator:
                     )
                     await self.event_bus.emit(tg_chat_id, answer_ready(task.id, response))
             
-            task.status = TaskStatus.FAILED if timed_out else TaskStatus.COMPLETED
+            task.status = TaskStatus.FAILED if (timed_out or task_failed) else TaskStatus.COMPLETED
             task.result = response
-            if timed_out:
+            if timed_out and not task.error:
                 task.error = f"hard timeout {max_time_sec}s"
         
         except Exception as e:
