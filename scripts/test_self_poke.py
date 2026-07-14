@@ -37,7 +37,13 @@ def test_ends_with_permission_question():
     assert o._ends_with_permission_question(long_resp)
     assert o._ends_with_permission_question("Сделать?")
     assert o._ends_with_permission_question("Восстановить?")
-    assert o._ends_with_permission_question("Найду все машины в сети.")
+
+
+def test_short_action_intent_still_caught():
+    """Короткое обещание БЕЗ '?' ('Найду все машины') — ловится через _looks_like_action_intent."""
+    o = _orch()
+    assert o._looks_like_action_intent("Найду все машины в сети.")
+    assert o._looks_like_action_intent("Сделаю это сейчас.")
 
 
 def test_not_permission_question():
