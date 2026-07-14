@@ -231,13 +231,19 @@ class TelegramAdapter:
                     "timeout": 30,  # long polling
                     "allowed_updates": ["message", "callback_query"],
                 })
-                
+
+                # _api_call глотает network-ошибки и возвращает None. Воспринимаем
+                # None как сбой → backoff (иначе polling долбит TG каждые ~10с часами
+                # и зарабатывает IP-бан — RemoteProtocolError: Server disconnected).
+                if updates is None:
+                    raise ConnectionError("getUpdates returned None (network/API error)")
+
                 # Сбрасываем счётчик ошибок при успехе
                 consecutive_errors = 0
-                
+
                 if not updates:
                     continue
-                
+
                 for update in updates:
                     self._last_update_id = update.get("update_id", self._last_update_id)
                     try:
@@ -246,10 +252,11 @@ class TelegramAdapter:
                         # Ошибка в одном update не должна валить polling loop
                         self.log.exception(f"Error handling update {update.get('update_id')}: {e}")
                         await asyncio.sleep(1)
-            
+
             except asyncio.CancelledError:
                 break
             except (ConnectionResetError, ConnectionError, httpx.ConnectError,
+                    httpx.ConnectTimeout, httpx.TimeoutException,
                     httpx.RemoteProtocolError, httpx.ReadTimeout) as e:
                 # Сетевые ошибки — TG API недоступен. Не падаем, ждём.
                 consecutive_errors += 1
@@ -257,14 +264,14 @@ class TelegramAdapter:
                     f"Network error (attempt {consecutive_errors}): "
                     f"{type(e).__name__}: {e}"
                 )
-                # Exponential backoff: 5s, 10s, 20s, 40s, max 60s
-                delay = min(5 * (2 ** (consecutive_errors - 1)), 60)
+                # Exponential backoff: 5s → 10 → 20 → 40 → 60 → 120 → 240 → 300 (cap 5 мин).
+                # Cap 5 мин (не 60с) — чтобы не спамить TG при длительном отвале сети.
+                delay = min(5 * (2 ** (consecutive_errors - 1)), 300)
                 await asyncio.sleep(delay)
             except Exception as e:
                 consecutive_errors += 1
                 self.log.exception(f"Polling error (attempt {consecutive_errors}): {e}")
-                await asyncio.sleep(min(5 * consecutive_errors, 60))
-                # Если слишком много ошибок подряд — что-то серьёзное
+                await asyncio.sleep(min(5 * consecutive_errors, 300))
                 if consecutive_errors > 20:
                     self.log.error(
                         "Too many consecutive polling errors — TG polling "
