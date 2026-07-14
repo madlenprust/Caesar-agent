@@ -40,7 +40,7 @@ def _restart_daemon() -> bool:
     # Пробуем через systemd
     try:
         result = subprocess.run(
-            ["systemctl", "--user", "restart", "caesar-daemon"],
+            ["systemctl", "--user", "restart", "caesar-daemon", "caesar-watchdog"],
             capture_output=True, text=True, timeout=10,
         )
         if result.returncode == 0:
@@ -358,7 +358,7 @@ async def cmd_update(args) -> int:
             f"; echo '--- trying systemctl --user restart ---' >> {log_file} 2>&1"
             f"; XDG_RUNTIME_DIR={xdg_runtime_dir} "
             f"DBUS_SESSION_BUS_ADDRESS=unix:path={xdg_runtime_dir}/bus "
-            f"systemctl --user restart caesar-daemon >> {log_file} 2>&1"
+            f"systemctl --user restart caesar-daemon caesar-watchdog >> {log_file} 2>&1"
             f"; USER_RC=$?"
             f"; echo 'systemctl --user exit code: '$USER_RC >> {log_file} 2>&1"
             # Если --user не сработал (exit != 0) — пробуем system
