@@ -197,7 +197,11 @@ class OpenAICompatibleProvider(LLMProvider):
 
                 # Retry на rate limit и transient errors
                 if resp.status_code in RETRY_STATUS_CODES and attempt < MAX_RETRIES:
-                    wait = (2 ** attempt) + random.uniform(0, 1)
+                    # 429 (Too Many Requests) — rate limit, нужен больший backoff,
+                    # чем 502/503/504 (transient overload). Иначе 3 быстрых ретрая
+                    # исчерпываются, а лимит ещё не снят → задача умирает на 429.
+                    mult = 8 if resp.status_code == 429 else 1
+                    wait = (2 ** attempt) * mult + random.uniform(0, 2)
                     self.log.warning(
                         f"LLM {resp.status_code} (attempt {attempt+1}/{MAX_RETRIES}), "
                         f"retry in {wait:.1f}s"
