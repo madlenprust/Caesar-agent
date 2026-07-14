@@ -186,14 +186,15 @@ class OpenAICompatibleProvider(LLMProvider):
         data = None
         
         for attempt in range(MAX_RETRIES + 1):
-            async with httpx.AsyncClient(timeout=120) as client:
-                resp = await client.post(url, json=payload, headers=headers)
+            try:
+                async with httpx.AsyncClient(timeout=120) as client:
+                    resp = await client.post(url, json=payload, headers=headers)
                 elapsed_ms = int((time.time() - start) * 1000)
-                
+
                 if resp.status_code == 200:
                     data = resp.json()
                     break
-                
+
                 # Retry на rate limit и transient errors
                 if resp.status_code in RETRY_STATUS_CODES and attempt < MAX_RETRIES:
                     wait = (2 ** attempt) + random.uniform(0, 1)
@@ -203,10 +204,27 @@ class OpenAICompatibleProvider(LLMProvider):
                     )
                     await asyncio.sleep(wait)
                     continue
-                
+
                 error_text = resp.text[:500]
                 self.log.error(f"LLM error {resp.status_code}: {error_text}")
                 raise RuntimeError(f"LLM API error {resp.status_code}: {error_text}")
+
+            except (httpx.RemoteProtocolError, httpx.ConnectError, httpx.ReadTimeout,
+                    httpx.ConnectTimeout, httpx.NetworkError, httpx.TimeoutException) as e:
+                # Транспортная ошибка (Server disconnected, ConnectTimeout, …) —
+                # transient, ретраим с backoff. Иначе один disconnect = сразу «Ошибка LLM»
+                # и агент не доделывает задачу.
+                if attempt < MAX_RETRIES:
+                    wait = (2 ** attempt) + random.uniform(0, 1)
+                    self.log.warning(
+                        f"LLM transport error (attempt {attempt+1}/{MAX_RETRIES}): "
+                        f"{type(e).__name__}, retry in {wait:.1f}s"
+                    )
+                    await asyncio.sleep(wait)
+                    continue
+                raise RuntimeError(
+                    f"LLM transport error after {MAX_RETRIES} retries: {type(e).__name__}"
+                )
         
         choice = data["choices"][0]
         message = choice["message"]
