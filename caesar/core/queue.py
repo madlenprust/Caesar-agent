@@ -420,91 +420,37 @@ class TaskQueue:
     # === Persistence (graceful restart) ===
     
     async def _restore_persisted_tasks(self) -> None:
-        """Восстановить незавершённые задачи из БД после рестарта daemon.
-        
-        Задачи со статусом 'running' или 'waiting_for_user' были прерваны
-        рестартом — пере-добавляем их в очередь (они начнутся заново).
-        Задачи со статусом 'pending' — просто пере-добавляем.
+        """На старте daemon: пометить незавершённые задачи из прошлой сессии
+        как 'interrupted' (failed). НЕ re-run, НЕ notify per-task.
+
+        Раньше restore ПЕРЕЗАПУСКАЛ старые задачи (re-queue) → флуд старыми
+        ответами + ложные 'зависла' от watchdog (видел stale 'running' строки).
+        Теперь: чистый старт — помечаем interrupted, без мусора.
         """
         try:
             unfinished = self._storage.get_unfinished_tasks()
         except Exception as e:
             self.log.error(f"Failed to load unfinished tasks: {e}")
             return
-        
+
         if not unfinished:
             return
-        
-        self.log.info(f"Restoring {len(unfinished)} unfinished task(s) from DB...")
-        
+
+        count = 0
         for row in unfinished:
-            # Конвертием SQLite row в Task
             try:
-                task = Task(
-                    id=row["id"],
-                    user_id=row["user_id"],
-                    channel_id=row["channel_id"],
-                    author_id=row.get("author_id", "") or "",
-                    source=row.get("source", "") or "",
-                    source_chat_id=row.get("source_chat_id", "") or "",
-                    user_message=row["user_message"],
-                    original_directive=row.get("original_directive", "") or row["user_message"],
-                    status=TaskStatus.PENDING,  # сбрасываем в pending
-                    priority=TaskPriority(row.get("priority", 2)),
-                    complexity=TaskComplexity(row.get("complexity", "simple")),
+                self._storage.update_task_status(
+                    row["id"], "failed",
+                    error="Прервано рестартом daemon (interrupted)",
                 )
-                # Восстанавливаем поля которые были до рестарта
-                task.current_step = row.get("current_step", 0) or 0
-                task.tokens_used = row.get("tokens_used", 0) or 0
-                task.cost_rub = row.get("cost_rub", 0.0) or 0.0
-                task.retry_count = row.get("retry_count", 0) or 0
-                task.worker_id = row.get("worker_id")
-                
-                # Если была 'running' — это прерванная задача, рестартуем
-                old_status = row.get("status", "pending")
-                self.log.info(
-                    f"  Restoring {task.id} (was {old_status}, step {task.current_step}, "
-                    f"tokens {task.tokens_used}): "
-                    f"'{task.user_message[:60]}...'"
-                )
-                
-                # Добавляем в _tasks и в очередь
-                self._tasks[task.id] = task
-                
-                if task.complexity == TaskComplexity.COMPLEX:
-                    queue = self._background_queue
-                    pool = "background"
-                else:
-                    queue = self._interactive_queue
-                    pool = "interactive"
-                
-                # Используем оригинальный created_at для сохранения порядка
-                created_ts = row.get("created_at")
-                if isinstance(created_ts, str):
-                    from datetime import datetime as dt
-                    try:
-                        created_ts = dt.fromisoformat(created_ts.replace("Z", "")).timestamp()
-                    except Exception:
-                        created_ts = task.created_at.timestamp()
-                else:
-                    created_ts = task.created_at.timestamp()
-                
-                await queue.put((
-                    task.priority.value,
-                    created_ts,
-                    task.id,
-                ))
-                
-            except Exception as e:
-                self.log.error(f"Failed to restore task {row.get('id', '?')}: {e}")
-        
-        # Чистим из БД — они теперь в RAM, будут сохранены при следующем shutdown
-        try:
-            self._storage.clear_unfinished_tasks()
-        except Exception:
-            pass
-        
-        self.log.info(f"Restored {len(unfinished)} task(s), re-queued for execution")
+                count += 1
+            except Exception:
+                pass
+
+        self.log.info(
+            f"Marked {count} stale task(s) as interrupted (no re-run, no flood). "
+            f"Clean slate for this session."
+        )
     
     def persist_unfinished_tasks(self) -> int:
         """Сохранить незавершённые задачи в БД перед shutdown.

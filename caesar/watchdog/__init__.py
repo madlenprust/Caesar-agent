@@ -105,52 +105,80 @@ class SmartWatchdog:
         await self._check_undelivered_cron()
     
     async def _check_stuck_tasks(self) -> None:
-        """Проверить зависшие задачи — running > 5 мин."""
+        """Проверить зависшие задачи — running > max_time(complexity) + 60с.
+
+        Только TRUE hangs: задача превысила свой лимит + self-cancel (0.7.4
+        asyncio.wait_fог) не сработал = event-loop заблокирован. НЕ фложит
+        legit задачи внутри их max_time. На true hang — mark failed + notify +
+        RESTART daemon (пинок).
+        """
         conn = None
         try:
             import sqlite3
             conn = sqlite3.connect(str(DB_PATH), timeout=5)
             conn.row_factory = sqlite3.Row
-            
-            cutoff = datetime.now() - timedelta(seconds=self._stuck_timeout_sec)
-            
+
+            now = datetime.now()
             rows = conn.execute("""
-                SELECT id, started_at, channel_id, user_id, user_message, 
-                       source_chat_id, source
+                SELECT id, started_at, complexity, channel_id, user_id,
+                       user_message, source_chat_id, source
                 FROM tasks
-                WHERE status = 'running' AND started_at < ?
-            """, (cutoff.strftime("%Y-%m-%d %H:%M:%S"),)).fetchall()
-            
+                WHERE status = 'running'
+            """).fetchall()
+
             for row in rows:
                 d = dict(row)
                 try:
                     started = datetime.fromisoformat(
                         str(d['started_at']).replace("T", " ").split(".")[0]
                     )
-                    stuck_min = (datetime.now() - started).total_seconds() / 60
                 except Exception:
-                    stuck_min = 999
-                
+                    continue
+
+                # Per-task max_time by complexity (как orchestrator._max_time_sec)
+                complexity = d.get("complexity", "simple")
+                max_time_sec = {
+                    "simple": 600, "medium": 3600, "complex": 14400,
+                }.get(complexity, 600)
+                stuck_threshold = max_time_sec + 60  # buffer
+                elapsed = (now - started).total_seconds()
+
+                if elapsed < stuck_threshold:
+                    continue  # внутри лимита — не зависла
+
+                stuck_min = elapsed / 60
                 self.log.warning(
-                    f"STUCK TASK {d['id']}: {stuck_min:.0f} min — "
-                    f"'{d['user_message'][:50]}...'"
+                    f"TRUE STUCK {d['id']}: {stuck_min:.0f} min "
+                    f"(max={max_time_sec // 60}min, complexity={complexity}) — "
+                    f"self-cancel failed, restarting daemon"
                 )
-                
-                # Помечаем как failed
+
                 conn.execute(
                     "UPDATE tasks SET status = 'failed', error = ? WHERE id = ?",
-                    (f"Зависла на {stuck_min:.0f} мин — убит watchdog", d['id']),
+                    (f"Истинное зависание ({stuck_min:.0f} мин, max={max_time_sec // 60}мин) "
+                     f"— убит watchdog + daemon restart", d['id']),
                 )
                 conn.commit()
-                
-                # Уведомляем пользователя
+
                 await self._notify_user(
                     d.get('source_chat_id', ''),
-                    f"⚠️ Задача зависла на {stuck_min:.0f} мин и остановлена.\n"
+                    f"⚠️ Задача зависла намертво ({stuck_min:.0f} мин) — перезапускаю daemon.\n"
                     f"Задача: «{d['user_message'][:80]}»\n"
-                    f"Попробуй попросить ещё раз."
+                    f"Попробуй ещё раз после рестарта."
                 )
-            
+
+                # Пинок: рестарт daemon (true hang = event-loop заблокирован)
+                try:
+                    import subprocess
+                    subprocess.run(
+                        ["systemctl", "--user", "restart", "caesar-daemon"],
+                        capture_output=True, timeout=10,
+                    )
+                    self.log.warning("Watchdog: restarted caesar-daemon (true hang)")
+                except Exception as e:
+                    self.log.error(f"Watchdog: cannot restart daemon: {e}")
+                break  # один рестарт за цикл — не флудим
+
         except Exception as e:
             self.log.debug(f"Cannot check stuck tasks: {e}")
         finally:
