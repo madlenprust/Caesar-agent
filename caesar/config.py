@@ -62,17 +62,68 @@ IS_DEV = (CODE_DIR / "pyproject.toml").exists()
 
 
 @dataclass
+class ProviderEntry:
+    """Один провайдер в списке (мульти-провайдер)."""
+    name: str = ""                           # уникальное имя (openai, zai, local, ...)
+    type: str = "openai"                     # openai | anthropic | custom (протокол API)
+    api_key: str = ""
+    base_url: Optional[str] = None
+    models: list = field(default_factory=list)  # список известных моделей (для UI)
+
+
+@dataclass
+class RoleConfig:
+    """Какую модель+провайдер использовать для роли (smart/cheap)."""
+    provider: str = ""   # имя провайдера из списка (ProviderEntry.name)
+    model: str = ""      # имя модели
+
+
+@dataclass
 class LLMConfig:
-    """Конфигурация LLM-провайдера."""
+    """Конфигурация LLM. Мульти-провайдер (новый формат) + legacy (старый).
+
+    Новый формат (config.yaml):
+        llm:
+          providers:
+            - name: openai
+              type: openai
+              api_key: "sk-..."
+              base_url: null
+              models: [gpt-4o, gpt-4o-mini]
+            - name: zai
+              type: custom
+              api_key: "..."
+              base_url: "https://api.z.ai/v1"
+              models: [glm-4.6, glm-4-flash]
+          smart:
+            provider: openai
+            model: gpt-4o
+          cheap:
+            provider: zai
+            model: glm-4-flash
+
+    Legacy (без `providers`): smart_provider/smart_model/smart_api_key/...
+    Авто-миграция: если `providers` пустой, но есть legacy-поля — LLMRouter
+    использует legacy напрямую (обратная совместимость со старым config.yaml).
+    """
+    # NEW: мульти-провайдер
+    providers: list = field(default_factory=list)  # list[ProviderEntry]
+    smart_role: RoleConfig = field(default_factory=RoleConfig)
+    cheap_role: RoleConfig = field(default_factory=RoleConfig)
+
+    # LEGACY (обратная совместимость — старый config.yaml без `providers`)
     smart_provider: str = "openai"
     smart_model: str = "gpt-4o"
     smart_api_key: str = ""
     smart_base_url: Optional[str] = None
-    
     cheap_provider: str = "openai"
     cheap_model: str = "gpt-4o-mini"
     cheap_api_key: str = ""
     cheap_base_url: Optional[str] = None
+
+    def is_multi_provider(self) -> bool:
+        """True если используется новый формат (providers список непустой)."""
+        return bool(self.providers)
 
 
 @dataclass
@@ -195,9 +246,22 @@ class Config:
             config.language = data["language"]
         
         if "llm" in data:
-            for k, v in data["llm"].items():
-                if hasattr(config.llm, k):
-                    setattr(config.llm, k, v)
+            llm_data = data["llm"]
+            if "providers" in llm_data:
+                # NEW: multi-provider format (providers list + smart/cheap roles)
+                config.llm.providers = [
+                    ProviderEntry(**p) if isinstance(p, dict) else p
+                    for p in llm_data["providers"]
+                ]
+                if isinstance(llm_data.get("smart"), dict):
+                    config.llm.smart_role = RoleConfig(**llm_data["smart"])
+                if isinstance(llm_data.get("cheap"), dict):
+                    config.llm.cheap_role = RoleConfig(**llm_data["cheap"])
+            else:
+                # LEGACY: old single-provider fields (smart_provider/smart_api_key/…)
+                for k, v in llm_data.items():
+                    if hasattr(config.llm, k):
+                        setattr(config.llm, k, v)
         
         if "telegram" in data:
             for k, v in data["telegram"].items():
@@ -240,18 +304,31 @@ class Config:
         редактирует config.yaml вручную.
         """
         path.parent.mkdir(parents=True, exist_ok=True)
+        # LLM: multi-provider (providers + smart/cheap) или legacy (smart_provider/…)
+        if self.llm.is_multi_provider():
+            llm_out = {
+                "providers": [
+                    p.__dict__ if hasattr(p, "__dict__") else p
+                    for p in self.llm.providers
+                ],
+                "smart": self.llm.smart_role.__dict__,
+                "cheap": self.llm.cheap_role.__dict__,
+            }
+        else:
+            llm_out = {
+                k: v for k, v in self.llm.__dict__.items()
+                if k not in ("providers", "smart_role", "cheap_role")
+            }
         data = {
             "mode": self.mode,
             "timezone": self.timezone,
             "language": self.language,
-            "llm": self.llm.__dict__,
+            "llm": llm_out,
             "telegram": self.telegram.__dict__,
             "stt": self.stt.__dict__,
             "l3": self.l3.__dict__,
             "cron": self.cron.__dict__,
             "queue": self.queue.__dict__,
-            # orchestrator НЕ пишем — используем дефолты из кода
-            # (иначе старые max_tokens переопределяют новые после update)
         }
         with open(path, "w", encoding="utf-8") as f:
             yaml.dump(data, f, allow_unicode=True, default_flow_style=False)

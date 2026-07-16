@@ -371,27 +371,62 @@ class LLMRouter:
     def __init__(self, config: Config):
         self.config = config
         self.log = get_logger("llm.router")
-        
-        # Авто-настройка cheap LLM: если cheap_api_key пустой, но smart_api_key
-        # есть — используем тот же key и provider с дешёвой моделью.
-        # Это экономит токены: analyzer, dream cycle, fact extraction идут через cheap.
-        if not config.llm.cheap_api_key and config.llm.smart_api_key:
-            config.llm.cheap_api_key = config.llm.smart_api_key
-            config.llm.cheap_provider = config.llm.smart_provider
-            config.llm.cheap_base_url = config.llm.smart_base_url
-            # Если cheap_model дефолтная (gpt-4o-mini) а smart — другой провайдер,
-            # подбираем разумную дешёвую модель
-            if config.llm.cheap_model == "gpt-4o-mini" and config.llm.smart_provider != "openai":
-                # Для не-OpenAI провайдеров — используем ту же модель что и smart
-                # (многие провайдеры не имеют отдельной cheap модели)
-                config.llm.cheap_model = config.llm.smart_model
-            self.log.info(
-                f"Auto-configured cheap LLM: {config.llm.cheap_provider} / "
-                f"{config.llm.cheap_model} (same key as smart)"
-            )
-        
-        self.smart = self._make_provider(config.llm, "smart")
-        self.cheap = self._make_provider(config.llm, "cheap")
+
+        if config.llm.is_multi_provider():
+            # NEW: multi-provider — resolve smart/cheap from the providers list
+            self.smart = self._resolve_from_list(config.llm, "smart")
+            self.cheap = self._resolve_from_list(config.llm, "cheap")
+            # Auto-config: если cheap не задан (нет имени/модели) → используем smart
+            if self.cheap is None and self.smart is not None:
+                config.llm.cheap_role = config.llm.smart_role
+                self.cheap = self.smart
+                self.log.info("Auto-configured cheap = smart (same provider+model)")
+        else:
+            # LEGACY: old single-provider fields
+            if not config.llm.cheap_api_key and config.llm.smart_api_key:
+                config.llm.cheap_api_key = config.llm.smart_api_key
+                config.llm.cheap_provider = config.llm.smart_provider
+                config.llm.cheap_base_url = config.llm.smart_base_url
+                if config.llm.cheap_model == "gpt-4o-mini" and config.llm.smart_provider != "openai":
+                    config.llm.cheap_model = config.llm.smart_model
+                self.log.info(
+                    f"Auto-configured cheap LLM: {config.llm.cheap_provider} / "
+                    f"{config.llm.cheap_model} (same key as smart)"
+                )
+            self.smart = self._make_provider(config.llm, "smart")
+            self.cheap = self._make_provider(config.llm, "cheap")
+
+    def _resolve_from_list(self, llm_config: "LLMConfig", role: str):
+        """Resolve a provider instance from the multi-provider list (new format).
+
+        role = "smart" | "cheap" → RoleConfig(provider="openai", model="gpt-4o")
+        → find ProviderEntry by name → construct a virtual LLMConfig → _make_provider.
+        """
+        role_cfg = llm_config.smart_role if role == "smart" else llm_config.cheap_role
+        provider_name = role_cfg.provider
+        model = role_cfg.model
+        # Find the provider entry by name
+        entry = next((p for p in llm_config.providers if p.name == provider_name), None)
+        if not entry and llm_config.providers:
+            entry = llm_config.providers[0]  # fallback to first
+            self.log.warning(f"LLM {role}: provider '{provider_name}' not found, "
+                             f"using '{entry.name}'")
+        if not entry:
+            self.log.error(f"LLM {role}: no providers configured")
+            return None
+        # Construct a virtual LLMConfig for the legacy _make_provider
+        virtual = LLMConfig()
+        virtual.smart_provider = entry.type
+        virtual.smart_model = model
+        virtual.smart_api_key = entry.api_key
+        virtual.smart_base_url = entry.base_url
+        # Also set cheap_* (for auto-config within _make_provider if needed)
+        virtual.cheap_provider = entry.type
+        virtual.cheap_model = model
+        virtual.cheap_api_key = entry.api_key
+        virtual.cheap_base_url = entry.base_url
+        self.log.info(f"LLM {role}: {entry.name}/{model} (type={entry.type})")
+        return self._make_provider(virtual, "smart")
     
     def _make_provider(self, llm_config: LLMConfig, role: str) -> LLMProvider:
         provider_name = (

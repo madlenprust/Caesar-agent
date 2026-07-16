@@ -182,6 +182,89 @@ def ask_choice(prompt: str, options: dict, default_key: str = "1") -> str:
         print(f"   Неверный выбор. Доступно: {', '.join(options.keys())}, q (выход)")
 
 
+def _setup_add_provider(config) -> None:
+    """Добавить нового провайдера в список (не затирая старых)."""
+    from caesar.config import ProviderEntry, RoleConfig
+    name = ask("   Имя (напр. openai, zai, local)", default="").strip()
+    if not name:
+        print("   ⚠️ Имя не может быть пустым")
+        return
+    if any(p.name == name for p in config.llm.providers):
+        print(f"   ⚠️ Провайдер '{name}' уже существует")
+        return
+    type_choice = ask_choice(
+        "   Тип API:",
+        {"1": "OpenAI", "2": "Anthropic", "3": "Custom (OpenAI-совместимый)"},
+        default_key="1",
+    )
+    ptype = {"1": "openai", "2": "anthropic", "3": "custom"}[type_choice]
+    api_key = safe_input("   API ключ: ").strip()
+    base_url = None
+    if ptype == "custom":
+        print("   Примеры: https://api.deepseek.com/v1, https://api.groq.com/openai/v1")
+        base_url = ask("   Base URL", default="").strip() or None
+    print("   Имена моделей (Enter = пропустить)")
+    smart_model = ask("   Smart модель", default="").strip()
+    cheap_model = ask("   Cheap модель", default=smart_model).strip()
+    models = [m for m in [smart_model, cheap_model] if m]
+    entry = ProviderEntry(name=name, type=ptype, api_key=api_key,
+                           base_url=base_url, models=models)
+    config.llm.providers.append(entry)
+    # Если первый — назначаем smart+cheap
+    if len(config.llm.providers) == 1:
+        config.llm.smart_role = RoleConfig(provider=name, model=smart_model or "gpt-4o")
+        config.llm.cheap_role = RoleConfig(provider=name, model=cheap_model or smart_model or "gpt-4o-mini")
+    print(f"   ✅ Добавлен: {name} ({ptype})")
+
+
+def _setup_switch_roles(config) -> None:
+    """Выбрать smart/cheap модели из списка провайдеров."""
+    from caesar.config import RoleConfig
+    if not config.llm.providers:
+        print("   Нет провайдеров")
+        return
+    print("\n   Smart (умная):")
+    for i, p in enumerate(config.llm.providers, 1):
+        print(f"   [{i}] {p.name}")
+    idx = ask("   Провайдер (номер)", default="1").strip()
+    try:
+        sp = config.llm.providers[int(idx) - 1]
+    except (ValueError, IndexError):
+        print("   ⚠️ Неверный выбор"); return
+    smart_model = ask("   Smart модель", default=config.llm.smart_role.model or "").strip()
+    config.llm.smart_role = RoleConfig(provider=sp.name, model=smart_model)
+    print("\n   Cheap (дешёвая):")
+    for i, p in enumerate(config.llm.providers, 1):
+        print(f"   [{i}] {p.name}")
+    idx = ask("   Провайдер (номер)", default="1").strip()
+    try:
+        cp = config.llm.providers[int(idx) - 1]
+    except (ValueError, IndexError):
+        cp = sp
+    cheap_model = ask("   Cheap модель", default=config.llm.cheap_role.model or smart_model).strip()
+    config.llm.cheap_role = RoleConfig(provider=cp.name, model=cheap_model)
+    print(f"   ✅ smart={sp.name}/{smart_model}, cheap={cp.name}/{cheap_model}")
+
+
+def _setup_remove_provider(config) -> None:
+    """Удалить провайдера из списка."""
+    print("   Кого удалить?")
+    for i, p in enumerate(config.llm.providers, 1):
+        print(f"   [{i}] {p.name}")
+    idx = ask("   Номер", default="").strip()
+    try:
+        i = int(idx) - 1
+        name = config.llm.providers[i].name
+        config.llm.providers.pop(i)
+        if config.llm.smart_role.provider == name and config.llm.providers:
+            config.llm.smart_role.provider = config.llm.providers[0].name
+        if config.llm.cheap_role.provider == name and config.llm.providers:
+            config.llm.cheap_role.provider = config.llm.providers[0].name
+        print(f"   ✅ Удалён: {name}")
+    except (ValueError, IndexError):
+        print("   ⚠️ Неверный выбор")
+
+
 async def run_setup(non_interactive: bool = False, config_path: Path = CONFIG_PATH) -> int:
     """Запустить setup wizard.
     
@@ -215,87 +298,59 @@ async def run_setup(non_interactive: bool = False, config_path: Path = CONFIG_PA
     config.mode = {"1": "auto", "2": "autonomous", "3": "full"}[mode_choice]
     print(f"   ✅ Режим: {config.mode}")
     
-    # 2. LLM-провайдер — определяем текущий
-    current_provider_key = "1"  # default
-    for k, v in PROVIDERS.items():
-        if v["name"] == config.llm.smart_provider:
-            current_provider_key = k
-            break
-    
-    # Показываем какой сейчас выбран
-    if config.llm.smart_api_key:
-        print(f"   (Текущий: {config.llm.smart_provider} / {config.llm.smart_model}, ключ установлен)")
+    # 2. LLM-провайдеры (multi-provider)
+    from caesar.config import ProviderEntry, RoleConfig
+
+    # Миграция: если legacy-формат (нет providers) → конвертируем
+    if not config.llm.is_multi_provider() and config.llm.smart_api_key:
+        config.llm.providers = [ProviderEntry(
+            name=config.llm.smart_provider,
+            type=config.llm.smart_provider,
+            api_key=config.llm.smart_api_key,
+            base_url=config.llm.smart_base_url,
+            models=[],
+        )]
+        config.llm.smart_role = RoleConfig(
+            provider=config.llm.smart_provider,
+            model=config.llm.smart_model,
+        )
+        config.llm.cheap_role = RoleConfig(
+            provider=config.llm.smart_provider,
+            model=config.llm.cheap_model or config.llm.smart_model,
+        )
+        print(f"   (Мигрировано с legacy на multi-provider: 1 провайдер)")
+
+    # Первый запуск (нет ни одного провайдера) → спрашиваем
+    if not config.llm.providers:
+        print("\n2. LLM-провайдер (первый):")
+        _setup_add_provider(config)
     else:
-        print(f"   (Текущий: {config.llm.smart_provider}, ключ НЕ установлен)")
-    
-    llm_choice = ask_choice(
-        "\n2. LLM-провайдер:",
-        {k: v["display"] for k, v in PROVIDERS.items()},
-        default_key=current_provider_key,
-    )
-    provider = PROVIDERS[llm_choice]
-    
-    # Для custom — спрашиваем base_url (с текущим как default)
-    if provider.get("custom"):
-        print(f"\n   🔗 Custom endpoint (OpenAI-совместимый API)")
-        print(f"   Примеры: https://api.deepseek.com/v1, https://api.groq.com/openai/v1,")
-        print(f"            https://api.together.xyz/v1, https://openrouter.ai/api/v1,")
-        print(f"            http://localhost:8000/v1 (vLLM/LM Studio)\n")
-        current_url = config.llm.smart_base_url or ""
-        base_url = ask("   Base URL", default=current_url)
-        provider["base_url"] = base_url
-        provider["name"] = "openai"
-    
-    if provider["name"] != "ollama":
-        # Показываем текущий ключ (маскированный)
-        if config.llm.smart_api_key:
-            masked = config.llm.smart_api_key[:8] + "..." + config.llm.smart_api_key[-4:]
-            print(f"\n   Текущий ключ: {masked}")
-            api_key = safe_input(f"   Новый API ключ (Enter = оставить текущий): ").strip()
-            if not api_key:
-                api_key = config.llm.smart_api_key  # оставляем текущий
-                print(f"   ✅ Оставлен текущий ключ")
-        else:
-            api_key = safe_input(f"   API ключ для {provider['display']}: ").strip()
-        
-        if api_key:
-            print("   Проверяю ключ...")
-            ok, msg = await validate_llm_key(
-                provider["name"], api_key, provider["base_url"],
-                model=config.llm.smart_model if provider.get("smart_model") is None else provider.get("smart_model"),
-            )
-            if ok:
-                print(f"   ✅ {msg}")
-            else:
-                print(f"   ⚠️ {msg}")
-                print("   (можно поправить позже через `caesar setup`)")
-        
-        config.llm.smart_api_key = api_key
-        config.llm.cheap_api_key = api_key
-    
-    config.llm.smart_provider = provider["name"]
-    config.llm.cheap_provider = provider["name"]
-    
-    # Для custom — спрашиваем имена моделей (с текущими как default)
-    if provider.get("custom") or not provider.get("smart_model"):
-        print(f"\n   📝 Имена моделей")
-        print(f"   Примеры: deepseek-chat, llama-3.3-70b-versatile, gpt-4o, и т.д.\n")
-        smart_model = ask("   Умная модель", default=config.llm.smart_model or "")
-        config.llm.smart_model = smart_model
-        
-        cheap_model = ask("   Дешёвая модель", default=config.llm.cheap_model or smart_model)
-        config.llm.cheap_model = cheap_model
-    else:
-        smart_model = ask("   Умная модель", default=provider["smart_model"])
-        config.llm.smart_model = smart_model
-        
-        cheap_model = ask("   Дешёвая модель", default=provider["cheap_model"])
-        config.llm.cheap_model = cheap_model
-    
-    if provider.get("base_url"):
-        config.llm.smart_base_url = provider["base_url"]
-        config.llm.cheap_base_url = provider["base_url"]
-    
+        # Показываем существующих + действия
+        print(f"\n2. LLM-провайдеры ({len(config.llm.providers)}):")
+        for i, p in enumerate(config.llm.providers, 1):
+            key_s = "✅ ключ" if p.api_key else "❌ ключ"
+            roles = []
+            if p.name == config.llm.smart_role.provider:
+                roles.append(f"smart={config.llm.smart_role.model}")
+            if p.name == config.llm.cheap_role.provider:
+                roles.append(f"cheap={config.llm.cheap_role.model}")
+            role_s = f" [{', '.join(roles)}]" if roles else ""
+            print(f"   [{i}] {p.name} ({p.type}, {key_s}){role_s}")
+
+        print(f"   [a] Добавить нового")
+        print(f"   [s] Сменить smart/cheap модели")
+        print(f"   [r] Удалить провайдера")
+        action = ask("\n   Действие (Enter = оставить как есть)", default="").strip().lower()
+
+        if action == "a":
+            _setup_add_provider(config)
+        elif action == "s":
+            _setup_switch_roles(config)
+        elif action == "r" and len(config.llm.providers) > 1:
+            _setup_remove_provider(config)
+        elif action == "r":
+            print("   ⚠️ Нельзя удалить единственного провайдера")
+
     # 3. Telegram-бот — с текущим значением
     print()
     if config.telegram.bot_token:
