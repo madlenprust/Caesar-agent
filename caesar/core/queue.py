@@ -340,18 +340,20 @@ class TaskQueue:
                         task.id, "failed",
                         completed_at=task.completed_at, error=task.error,
                     )
-                elif task.status == TaskStatus.RUNNING:
-                    task.status = TaskStatus.COMPLETED
-                    task.completed_at = datetime.now()
-                    # Пишем результат в БД — для cron re-delivery и истории.
+                elif task.status in (TaskStatus.RUNNING, TaskStatus.COMPLETED):
+                    # RUNNING → оркестратор не поставил статус (не должен, но fallback).
+                    # COMPLETED → оркестратор сам поставил (нормальный путь).
+                    # В обоих случаях — персистим completed в БД, иначе watchdog
+                    # будет видеть 'running' и фложить отвеченную задачу как «зависла».
+                    if task.status == TaskStatus.RUNNING:
+                        task.status = TaskStatus.COMPLETED
+                        task.completed_at = datetime.now()
                     self._update_task_status_safe(
                         task.id, "completed",
                         completed_at=task.completed_at,
                         result=task.result, tokens_used=task.tokens_used,
                     )
                 elif task.status == TaskStatus.FAILED:
-                    # Оркестратор завершил failed (хард-таймаут и т.п.) — фиксируем в БД,
-                    # иначе watchdog продолжит видеть задачу как running.
                     if not task.completed_at:
                         task.completed_at = datetime.now()
                     self._update_task_status_safe(
