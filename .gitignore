@@ -68,11 +68,16 @@ var/run/*
 
 # Секреты — НИКОГДА не коммитить
 .env
-etc/secrets.yaml
+config.yaml
 etc/config.yaml
+secrets.yaml
 *.secret
 *.key
 *.pem
+
+# Runtime data (всё внутри проекта)
+data/
+
 
 # Пользовательские загрузки и артефакты агента — НЕ в git
 upload/

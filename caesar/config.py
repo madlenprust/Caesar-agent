@@ -27,23 +27,12 @@ HOME = Path.home()
 # Код: parent от этого файла (caesar/config.py → caesar/ → корень проекта)
 CODE_DIR = Path(__file__).resolve().parent.parent
 
-# Директории — с переопределением через env
-DATA_DIR = Path(os.environ.get(
-    "CAESAR_DATA_DIR",
-    str(HOME / ".local" / "share" / "caesar" / "data"),
-))
-CONFIG_DIR = Path(os.environ.get(
-    "CAESAR_CONFIG_DIR",
-    str(HOME / ".config" / "caesar"),
-))
-LOG_DIR = Path(os.environ.get(
-    "CAESAR_LOG_DIR",
-    str(HOME / ".local" / "share" / "caesar" / "log"),
-))
-RUN_DIR = Path(os.environ.get(
-    "CAESAR_RUN_DIR",
-    str(HOME / ".local" / "share" / "caesar"),
-))
+# Директории — ВСЁ ВНУТРИ ПАПКИ ПРОЕКТА (~/caesar/), не раскидано по системе.
+# Переопределение через env всё ещё работает (для multi-user/dev).
+DATA_DIR = Path(os.environ.get("CAESAR_DATA_DIR", str(CODE_DIR / "data")))
+CONFIG_DIR = Path(os.environ.get("CAESAR_CONFIG_DIR", str(CODE_DIR)))
+LOG_DIR = Path(os.environ.get("CAESAR_LOG_DIR", str(CODE_DIR / "data" / "log")))
+RUN_DIR = Path(os.environ.get("CAESAR_RUN_DIR", str(CODE_DIR / "data")))
 
 # Сокет — в RUN_DIR
 SOCKET_PATH = RUN_DIR / "caesar.sock"

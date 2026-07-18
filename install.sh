@@ -33,9 +33,10 @@ step()  { echo -e "${BLUE}🔧${NC} $1"; }
 REPO_URL="${CAESAR_REPO:-https://github.com/madlenprust/Caesar-agent.git}"
 BRANCH="${CAESAR_BRANCH:-main}"
 REPO_DIR="${CAESAR_REPO_DIR:-${HOME}/caesar}"
-VENV_DIR="${HOME}/.local/share/caesar/venv"
-DATA_DIR="${HOME}/.local/share/caesar/data"
-CONFIG_DIR="${HOME}/.config/caesar"
+VENV_DIR="${REPO_DIR}/venv"
+DATA_DIR="${REPO_DIR}/data"
+CONFIG_DIR="${REPO_DIR}"
+LOG_DIR="${REPO_DIR}/data/log"
 SYSTEMD_USER_DIR="${HOME}/.config/systemd/user"
 LOCAL_BIN_DIR="${HOME}/.local/bin"
 
