@@ -17,6 +17,8 @@ import subprocess
 import time
 from typing import Any
 
+import html as _html_mod
+
 import httpx
 
 from caesar.config import CONFIG_DIR, Config
@@ -64,6 +66,37 @@ class TgSession:
         self.god_mode: bool = False
         # event handler — сохраняем чтобы можно было отписаться при /clear
         self._event_handler: Any = None
+
+
+def _markdown_to_tg_html(text: str) -> str:
+    """Конвертировать markdown в Telegram HTML (без внешних зависимостей).
+
+    Telegram поддерживает: <b>, <i>, <u>, <s>, <code>, <pre>, <blockquote>.
+    Не идеальный markdown-парсер, но покрывает 90% случаев (bold, italic, lists,
+    code blocks, headings) — и главное: не показывает **звёздочки** пользователю.
+    """
+    # 1. Escape HTML спецсимволов (ДО конверсии markdown → HTML тегов)
+    text = _html_mod.escape(text)
+
+    # 2. Code blocks ```lang\n...```
+    text = re.sub(r'```(\w*)\n?(.*?)```', r'<pre>\2</pre>', text, flags=re.DOTALL)
+
+    # 3. Inline code `code`
+    text = re.sub(r'`([^`]+)`', r'<code>\1</code>', text)
+
+    # 4. Bold **text**
+    text = re.sub(r'\*\*([^*]+)\*\*', r'<b>\1</b>', text)
+
+    # 5. Italic *text* (но не **)
+    text = re.sub(r'(?<!\*)\*([^*]+)\*(?!\*)', r'<i>\1</i>', text)
+
+    # 6. List items: - / * в начале строки → •
+    text = re.sub(r'^[\s]*[-*]\s+', '• ', text, flags=re.MULTILINE)
+
+    # 7. Headings: # text → <b>text</b>
+    text = re.sub(r'^#{1,3}\s+(.+)$', r'<b>\1</b>', text, flags=re.MULTILINE)
+
+    return text
 
 
 def authorize_tg_message(
@@ -1596,10 +1629,10 @@ class TelegramAdapter:
         Всегда используем MarkdownV2 через telegramify-markdown если доступен.
         Если нет — plain text.
         """
-        # Пытаемся конвертировать markdown → MarkdownV2
+        # Пытаемся конвертировать markdown → Telegram формат
         final_text = text
         final_parse_mode = parse_mode  # по умолчанию = caller's parse_mode
-        
+
         # Markdownify только если caller НЕ запросил HTML
         if parse_mode != "HTML":
             try:
@@ -1607,7 +1640,9 @@ class TelegramAdapter:
                 final_text = markdownify(text)
                 final_parse_mode = "MarkdownV2"
             except ImportError:
-                pass
+                # Fallback: встроенный markdown→HTML конвертер (без зависимостей)
+                final_text = _markdown_to_tg_html(text)
+                final_parse_mode = "HTML"
         
         data: dict = {
             "chat_id": chat_id,
