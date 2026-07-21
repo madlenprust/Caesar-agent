@@ -752,6 +752,136 @@ async def cmd_stats(args) -> int:
     return 0
 
 
+async def cmd_provider(args) -> int:
+    """Управление LLM провайдерами (multi-provider).
+
+    list    — показать провайдеров + роли smart/cheap
+    add     — добавить провайдера (интерактивно)
+    switch  — сменить smart/cheap модель (по имени провайдера)
+    remove  — удалить провайдера
+    """
+    from caesar.config import Config, ProviderEntry, RoleConfig, CONFIG_PATH
+
+    config = Config.load(CONFIG_PATH)
+    action = args.provider_action
+
+    # Миграция legacy → multi-provider если нужно
+    if not config.llm.is_multi_provider() and config.llm.smart_api_key:
+        config.llm.providers = [ProviderEntry(
+            name=config.llm.smart_provider or "default",
+            type=config.llm.smart_provider or "openai",
+            api_key=config.llm.smart_api_key,
+            base_url=config.llm.smart_base_url,
+            models=[config.llm.smart_model, config.llm.cheap_model],
+        )]
+        config.llm.smart_role = RoleConfig(
+            provider=config.llm.smart_provider or "default",
+            model=config.llm.smart_model,
+        )
+        config.llm.cheap_role = RoleConfig(
+            provider=config.llm.smart_provider or "default",
+            model=config.llm.cheap_model or config.llm.smart_model,
+        )
+
+    if action == "list":
+        if not config.llm.providers:
+            print("Нет провайдеров. Добавь: caesar provider add")
+            return 0
+        print(f"\nПровайдеров: {len(config.llm.providers)}\n")
+        for p in config.llm.providers:
+            key_s = "✅ ключ" if p.api_key else "❌ ключ"
+            url_s = f", base_url={p.base_url}" if p.base_url else ""
+            roles = []
+            if p.name == config.llm.smart_role.provider:
+                roles.append(f"smart={config.llm.smart_role.model}")
+            if p.name == config.llm.cheap_role.provider:
+                roles.append(f"cheap={config.llm.cheap_role.model}")
+            role_s = f"  [{', '.join(roles)}]" if roles else ""
+            print(f"  {p.name} ({p.type}, {key_s}{url_s}){role_s}")
+            if p.models:
+                print(f"    models: {', '.join(p.models)}")
+        print()
+
+    elif action == "add":
+        name = safe_input("Имя (напр. openai, zai, local): ").strip()
+        if not name:
+            print("⚠️ Имя не может быть пустым")
+            return 1
+        if any(p.name == name for p in config.llm.providers):
+            print(f"⚠️ '{name}' уже существует")
+            return 1
+        type_choice = ask_choice("Тип API:", {
+            "1": "OpenAI", "2": "Anthropic", "3": "Custom (OpenAI-совместимый)"
+        }, default_key="1")
+        ptype = {"1": "openai", "2": "anthropic", "3": "custom"}[type_choice]
+        api_key = safe_input("API ключ: ").strip()
+        base_url = None
+        if ptype == "custom":
+            print("Примеры: https://api.deepseek.com/v1, https://api.groq.com/openai/v1")
+            base_url = safe_input("Base URL (или Enter для пропуска): ").strip() or None
+        smart_model = safe_input("Smart модель (напр. gpt-4o): ").strip()
+        cheap_model = safe_input("Cheap модель (или Enter = smart): ").strip() or smart_model
+        models = list({smart_model, cheap_model} - {""})
+        entry = ProviderEntry(name=name, type=ptype, api_key=api_key,
+                               base_url=base_url, models=models)
+        config.llm.providers.append(entry)
+        if len(config.llm.providers) == 1 or not config.llm.smart_role.provider:
+            config.llm.smart_role = RoleConfig(provider=name, model=smart_model)
+            config.llm.cheap_role = RoleConfig(provider=name, model=cheap_model)
+        config.save()
+        print(f"✅ Добавлен: {name} ({ptype})")
+        print("Перезапусти daemon: systemctl --user restart caesar-daemon")
+
+    elif action == "switch":
+        role = args.role  # "smart" or "cheap"
+        provider_name = args.name
+        model = args.model
+        entry = next((p for p in config.llm.providers if p.name == provider_name), None)
+        if not entry:
+            print(f"⚠️ Провайдер '{provider_name}' не найден")
+            print("Доступные: " + ", ".join(p.name for p in config.llm.providers))
+            return 1
+        if not model:
+            if entry.models:
+                print(f"Модели {provider_name}: {', '.join(entry.models)}")
+            model = safe_input(f"Модель для {role}: ").strip()
+            if not model:
+                print("⚠️ Модель не указана")
+                return 1
+        if role == "smart":
+            config.llm.smart_role = RoleConfig(provider=provider_name, model=model)
+        else:
+            config.llm.cheap_role = RoleConfig(provider=provider_name, model=model)
+        config.save()
+        print(f"✅ {role}: {provider_name}/{model}")
+        print("Перезапусти daemon: systemctl --user restart caesar-daemon")
+
+    elif action == "remove":
+        name = args.name
+        entry = next((p for p in config.llm.providers if p.name == name), None)
+        if not entry:
+            print(f"⚠️ '{name}' не найден")
+            return 1
+        if len(config.llm.providers) <= 1:
+            print("⚠️ Нельзя удалить единственного провайдера")
+            return 1
+        config.llm.providers.remove(entry)
+        # Переключаем smart/cheap если они ссылались на удалённого
+        if config.llm.smart_role.provider == name:
+            first = config.llm.providers[0]
+            config.llm.smart_role = RoleConfig(provider=first.name,
+                                                model=first.models[0] if first.models else "")
+        if config.llm.cheap_role.provider == name:
+            first = config.llm.providers[0]
+            config.llm.cheap_role = RoleConfig(provider=first.name,
+                                                model=first.models[-1] if first.models else "")
+        config.save()
+        print(f"✅ Удалён: {name}")
+        print("Перезапусти daemon: systemctl --user restart caesar-daemon")
+
+    return 0
+
+
 async def cmd_pair(args) -> int:
     """Привязать бота к Telegram-аккаунту владельца.
 
@@ -2912,7 +3042,19 @@ async def main_async() -> int:
     p_kg_graph.add_argument("--depth", type=int, default=2, help="Глубина обхода")
     p_kg_sub.add_parser("stale", help="Stale entities (>30 дней)")
     p_kg_sub.add_parser("cleanup", help="Удалить stale entities (>60 дней)")
-    
+
+    # provider — управление LLM провайдерами (multi-provider)
+    p_provider = subparsers.add_parser("provider", help="Управление LLM провайдерами")
+    p_provider_sub = p_provider.add_subparsers(dest="provider_action", required=True)
+    p_provider_sub.add_parser("list", help="Список провайдеров + роли smart/cheap")
+    p_provider_sub.add_parser("add", help="Добавить провайдера (интерактивно)")
+    p_sw = p_provider_sub.add_parser("switch", help="Сменить smart/cheap модель")
+    p_sw.add_argument("role", choices=["smart", "cheap"], help="smart или cheap")
+    p_sw.add_argument("name", help="Имя провайдера (из списка)")
+    p_sw.add_argument("model", nargs="?", default="", help="Модель (опц.)")
+    p_rm = p_provider_sub.add_parser("remove", help="Удалить провайдера")
+    p_rm.add_argument("name", help="Имя провайдера")
+
     args = parser.parse_args()
     
     if args.command == "setup":
@@ -2926,6 +3068,9 @@ async def main_async() -> int:
     elif args.command == "pair":
         setup_logging()
         return await cmd_pair(args)
+    elif args.command == "provider":
+        setup_logging()
+        return await cmd_provider(args)
     elif args.command == "permissions":
         setup_logging()
         return await cmd_permissions(args)

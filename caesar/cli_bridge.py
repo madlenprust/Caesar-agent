@@ -25,7 +25,7 @@ from caesar.config import SOCKET_PATH
 
 # Команды management (не требуют daemon)
 MGMT_COMMANDS = {
-    "setup", "update", "rollback", "uninstall", "pair",
+    "setup", "update", "rollback", "uninstall", "pair", "provider",
     "permissions", "stats", "self-scan", "enable", "l3", "models", "cron",
     "skill", "doctor", "db", "kg", "config",
 }
