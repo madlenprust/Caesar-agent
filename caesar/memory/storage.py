@@ -327,8 +327,13 @@ class Storage:
                 if "original_directive" not in task_columns:
                     conn.execute("ALTER TABLE tasks ADD COLUMN original_directive TEXT")
                     self.log.info("Migration: added original_directive column to tasks table")
+                # paused — флаг мягкой паузы (/pause). Watchdog исключает paused
+                # задачи из hang-kill, поэтому колонка должна быть в DB, не только в RAM.
+                if "paused" not in task_columns:
+                    conn.execute("ALTER TABLE tasks ADD COLUMN paused INTEGER DEFAULT 0")
+                    self.log.info("Migration: added paused column to tasks table")
             except Exception as e:
-                self.log.warning(f"Migration original_directive failed: {e}")
+                self.log.warning(f"Migration original_directive/paused failed: {e}")
 
             # Миграция: добавляем consecutive_failures колонку в l4_skills
             try:
@@ -625,7 +630,7 @@ class Storage:
         values = [status]
         for k, v in extra.items():
             if k in ("started_at", "completed_at", "worker_id", "current_step",
-                     "tokens_used", "result", "error", "retry_count"):
+                     "tokens_used", "result", "error", "retry_count", "paused"):
                 fields.append(f"{k} = ?")
                 values.append(v)
         values.append(task_id)

@@ -29,8 +29,56 @@ from caesar.logging_setup import get_logger
 
 
 # Retry константы
-RETRY_STATUS_CODES = {429, 502, 503, 504}
 MAX_RETRIES = 3
+
+
+@dataclass
+class LLMErrorClass:
+    """Семантическая классификация HTTP-ошибки провайдера.
+
+    Решение о ретрае принимается по смыслу ошибки, а не только по статус-коду:
+    разные провайдеры шлют разный код для одной семантики (429 = rate limit у
+    OpenAI, 529 = overloaded у Anthropic), а внутри одного кода бывают разные
+    смыслы (429 rate-limit ретраим, 429 quota-exceeded — нет, не восстановится).
+    """
+    category: str  # rate_limit | overloaded | server_error | quota_exceeded | auth | invalid_request | unknown
+    retry: bool
+    backoff_mult: float = 1.0  # множитель базевого backoff (2 ** attempt)
+
+
+def classify_http_error(status_code: int, body: str) -> LLMErrorClass:
+    """Классифицировать ошибку по СМЫСЛУ: статус-код + тело ответа."""
+    body_lower = (body or "").lower()
+
+    # Auth — невосстановимо при текущем ключе, ретраить бессмысленно
+    if status_code in (401, 403):
+        return LLMErrorClass("auth", retry=False)
+
+    # Quota / billing — не снимется за секунды
+    if "quota" in body_lower or "billing" in body_lower or "insufficient" in body_lower:
+        return LLMErrorClass("quota_exceeded", retry=False)
+
+    # Overloaded — Anthropic 529, или тело говорит об overload
+    if status_code == 529 or "overloaded" in body_lower or "overload" in body_lower:
+        return LLMErrorClass("overloaded", retry=True, backoff_mult=4.0)
+
+    # Rate limit — снимется, но нужен длинный backoff
+    if status_code == 429:
+        return LLMErrorClass("rate_limit", retry=True, backoff_mult=8.0)
+
+    # Transient server errors
+    if status_code in (502, 503, 504):
+        return LLMErrorClass("server_error", retry=True, backoff_mult=1.0)
+
+    # Прочий 4xx — невосстановимый bad request
+    if 400 <= status_code < 500:
+        return LLMErrorClass("invalid_request", retry=False)
+
+    # Неизвестный 5xx — ретраим на всякий
+    if 500 <= status_code < 600:
+        return LLMErrorClass("server_error", retry=True, backoff_mult=1.0)
+
+    return LLMErrorClass("unknown", retry=False)
 
 
 @dataclass
@@ -63,9 +111,13 @@ class LLMResponse:
 
 class LLMProvider:
     """Базовый класс провайдера."""
-    
+
     provider_name: str = "base"
-    
+    # Минимальный интервал между последовательными запросами к одному
+    # провайдеру (provider pacing) — софт-рейт-лимит: бережём лимиты API,
+    # понижаем шанс 429. Мягкий: гонки допустимы, точного guarantee нет.
+    MIN_REQUEST_INTERVAL: float = 0.5
+
     def __init__(self, config: LLMConfig, role: str):
         """role = 'smart' | 'cheap'"""
         self.role = role
@@ -80,6 +132,17 @@ class LLMProvider:
             self.base_url = config.cheap_base_url or "https://api.openai.com/v1"
             self.provider_name = config.cheap_provider
         self.log = get_logger(f"llm.{role}")
+        # Метка прошлого запроса — для provider pacing
+        self._last_request_time: float = 0.0
+
+    async def _pace(self) -> None:
+        """Подождать MIN_REQUEST_INTERVAL с прошлого запроса (provider pacing)."""
+        now = time.time()
+        if self._last_request_time:
+            remaining = self.MIN_REQUEST_INTERVAL - (now - self._last_request_time)
+            if remaining > 0:
+                await asyncio.sleep(remaining)
+        self._last_request_time = time.time()
     
     async def chat(
         self,
@@ -181,7 +244,8 @@ class OpenAICompatibleProvider(LLMProvider):
             "Authorization": f"Bearer {self.api_key}",
             "Content-Type": "application/json",
         }
-        
+
+        await self._pace()  # provider pacing — софт-рейт-лимит перед запросом
         start = time.time()
         data = None
         
@@ -195,23 +259,22 @@ class OpenAICompatibleProvider(LLMProvider):
                     data = resp.json()
                     break
 
-                # Retry на rate limit и transient errors
-                if resp.status_code in RETRY_STATUS_CODES and attempt < MAX_RETRIES:
-                    # 429 (Too Many Requests) — rate limit, нужен больший backoff,
-                    # чем 502/503/504 (transient overload). Иначе 3 быстрых ретрая
-                    # исчерпываются, а лимит ещё не снят → задача умирает на 429.
-                    mult = 8 if resp.status_code == 429 else 1
-                    wait = (2 ** attempt) * mult + random.uniform(0, 2)
+                # Классифицируем ошибку по СМЫСЛУ (статус + тело), не только по коду
+                err = classify_http_error(resp.status_code, resp.text[:500])
+                if err.retry and attempt < MAX_RETRIES:
+                    wait = (2 ** attempt) * err.backoff_mult + random.uniform(0, 2)
                     self.log.warning(
-                        f"LLM {resp.status_code} (attempt {attempt+1}/{MAX_RETRIES}), "
-                        f"retry in {wait:.1f}s"
+                        f"LLM {resp.status_code} [{err.category}] "
+                        f"(attempt {attempt+1}/{MAX_RETRIES}), retry in {wait:.1f}s"
                     )
                     await asyncio.sleep(wait)
                     continue
 
                 error_text = resp.text[:500]
-                self.log.error(f"LLM error {resp.status_code}: {error_text}")
-                raise RuntimeError(f"LLM API error {resp.status_code}: {error_text}")
+                self.log.error(f"LLM error {resp.status_code} [{err.category}]: {error_text}")
+                raise RuntimeError(
+                    f"LLM API error {resp.status_code} [{err.category}]: {error_text}"
+                )
 
             except (httpx.RemoteProtocolError, httpx.ConnectError, httpx.ReadTimeout,
                     httpx.ConnectTimeout, httpx.NetworkError, httpx.TimeoutException) as e:
@@ -309,7 +372,8 @@ class AnthropicProvider(LLMProvider):
             "anthropic-version": "2023-06-01",
             "Content-Type": "application/json",
         }
-        
+
+        await self._pace()  # provider pacing — софт-рейт-лимит перед запросом
         start = time.time()
         data = None
         
@@ -323,19 +387,21 @@ class AnthropicProvider(LLMProvider):
                     data = resp.json()
                     break
 
-                if resp.status_code in RETRY_STATUS_CODES and attempt < MAX_RETRIES:
-                    mult = 8 if resp.status_code == 429 else 1
-                    wait = (2 ** attempt) * mult + random.uniform(0, 2)
+                err = classify_http_error(resp.status_code, resp.text[:500])
+                if err.retry and attempt < MAX_RETRIES:
+                    wait = (2 ** attempt) * err.backoff_mult + random.uniform(0, 2)
                     self.log.warning(
-                        f"Anthropic {resp.status_code} (attempt {attempt+1}/{MAX_RETRIES}), "
-                        f"retry in {wait:.1f}s"
+                        f"Anthropic {resp.status_code} [{err.category}] "
+                        f"(attempt {attempt+1}/{MAX_RETRIES}), retry in {wait:.1f}s"
                     )
                     await asyncio.sleep(wait)
                     continue
 
                 error_text = resp.text[:500]
-                self.log.error(f"Anthropic error {resp.status_code}: {error_text}")
-                raise RuntimeError(f"Anthropic API error {resp.status_code}: {error_text}")
+                self.log.error(f"Anthropic error {resp.status_code} [{err.category}]: {error_text}")
+                raise RuntimeError(
+                    f"Anthropic API error {resp.status_code} [{err.category}]: {error_text}"
+                )
 
             except (httpx.RemoteProtocolError, httpx.ConnectError, httpx.ReadTimeout,
                     httpx.ConnectTimeout, httpx.NetworkError, httpx.TimeoutException) as e:

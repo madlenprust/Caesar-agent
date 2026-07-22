@@ -633,6 +633,12 @@ class TelegramAdapter:
             elif text in ("/stop", "/abort", "/cancel"):
                 # Экстренная остановка текущей задачи
                 await self._handle_stop_task(chat_id)
+            elif text in ("/pause", "/hold"):
+                # Мягкая пауза текущей задачи (без отмены)
+                await self._handle_pause_task(chat_id, pause=True)
+            elif text in ("/resume", "/continue", "/go"):
+                # Возобновление приостановленной задачи
+                await self._handle_pause_task(chat_id, pause=False)
             elif text in ("/settings", "/настройки"):
                 await self._handle_settings(chat_id)
             return
@@ -1803,6 +1809,7 @@ class TelegramAdapter:
             "  <b>/status</b> — состояние системы, память, токены, модели\n"
             "  <b>/clear</b> — очистить контекст диалога (начать заново)\n"
             "  <b>/stop</b> — остановить текущую задачу\n"
+            "  <b>/pause</b> / <b>/resume</b> — приостановить и продолжить задачу\n"
             "  <b>/update</b> — обновить код + перезапуск daemon\n"
             "  <b>/help</b> — эта справка\n\n"
             
@@ -2165,7 +2172,68 @@ class TelegramAdapter:
                 "ℹ️ Активных задач для этого чата не найдено.\n"
                 "Возможно задача уже завершилась или идёт в другом чате.",
             )
-    
+
+    async def _handle_pause_task(self, chat_id: int, pause: bool) -> None:
+        """Приостановить (/pause) или возобновить (/resume) текущую задачу.
+
+        Мягкая пауза: оркестратор крутит шаги ReAct-цикла; при task.paused
+        он замирает на текущем шаге (без сжигания токенов) до /resume или /stop.
+        Флаг персистим в DB — watchdog не убивает paused-задачу как hang.
+        """
+        action = "⏸️ Приостанавливаю" if pause else "▶️ Возобновляю"
+        await self._send_message(chat_id, f"{action} текущую задачу...")
+
+        session = self._sessions.get(chat_id)
+        if not session:
+            await self._send_message(chat_id, "ℹ️ Нет активной сессии — нечего делать.")
+            return
+
+        channel_id = session.channel_id
+        count = 0
+        if self.queue:
+            from caesar.core.queue import TaskStatus
+            for task in list(self.queue._tasks.values()):
+                if task.channel_id != channel_id:
+                    continue
+                # pause — только running; resume — приостановленные (paused)
+                if pause and task.status != TaskStatus.RUNNING:
+                    continue
+                if not pause and not getattr(task, "paused", False):
+                    continue
+                try:
+                    task.paused = pause
+                    if self.storage:
+                        self.storage.update_task_status(
+                            task.id, task.status.value, paused=1 if pause else 0
+                        )
+                    count += 1
+                    self.log.info(
+                        f"{'Paused' if pause else 'Resumed'} task {task.id}: "
+                        f"'{task.user_message[:50]}...'"
+                    )
+                except Exception as e:
+                    self.log.warning(f"Failed to {'pause' if pause else 'resume'} task {task.id}: {e}")
+
+        if count > 0:
+            if pause:
+                await self._send_message(
+                    chat_id,
+                    f"⏸️ Приостановлено задач: {count}\n/resume — продолжить выполнение.",
+                )
+            else:
+                await self._send_message(chat_id, f"▶️ Возобновлено задач: {count}")
+        else:
+            if pause:
+                await self._send_message(
+                    chat_id,
+                    "ℹ️ Нет активных (running) задач для паузы.\n"
+                    "Возможно задача уже завершилась.",
+                )
+            else:
+                await self._send_message(
+                    chat_id, "ℹ️ Нет приостановленных задач для возобновления."
+                )
+
     async def _handle_tg_update(self, chat_id: int) -> None:
         """Обновить Caesar через Telegram.
         

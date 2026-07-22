@@ -827,6 +827,18 @@ class Orchestrator:
                 await emit_progress("⏹️")
                 return "⏹️ Остановлено пользователем."
 
+            # /pause ставит task.paused — приостанавливаемся до /resume (или /stop),
+            # НЕ сжигая токены: процесс висит в RAM на этом шаге.
+            if getattr(task, "paused", False):
+                await emit_progress("⏸️")
+                self.log.info(f"Task {task.id} paused at step {step}")
+                while getattr(task, "paused", False) and not getattr(task, "cancelled", False):
+                    await asyncio.sleep(1)
+                if getattr(task, "cancelled", False):
+                    return "⏹️ Остановлено пользователем."
+                self.log.info(f"Task {task.id} resumed at step {step}")
+                await emit_progress("🧠")
+
             # Лимит токенов — мягкое предупреждение, НЕ прерываем сразу.
             # Если LLM в середине работы (были tool calls), даём ей закончить
             # текущую цепочку и ответить. Жёстко прерываем только если токенов

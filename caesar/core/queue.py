@@ -83,6 +83,7 @@ class Task:
     waiting_since: datetime | None = None
 
     cancelled: bool = False  # /stop — оркестратор и worker проверяют этот флаг
+    paused: bool = False  # /pause — оркестратор ждёт /resume, не сжигая токены
 
 
 class TaskQueue:

@@ -124,6 +124,7 @@ class SmartWatchdog:
                        user_message, source_chat_id, source
                 FROM tasks
                 WHERE status = 'running'
+                  AND (paused IS NULL OR paused = 0)
             """).fetchall()
 
             for row in rows:
