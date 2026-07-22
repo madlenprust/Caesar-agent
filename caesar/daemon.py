@@ -362,40 +362,47 @@ class AgentDaemon:
     async def _run_morning_briefing(self) -> None:
         """Отправить morning briefing (вызывается cron в 9:00)."""
         self.log.info("🌅 Morning briefing triggered by cron")
-        
+
         try:
             from caesar.core.briefing import MorningBriefing
-            
+
             briefing = MorningBriefing(
                 config=self.config,
                 storage=self.storage,
                 event_bus=self.event_bus,
             )
-            
-            # Находим user_id и channel_id для отправки
-            # Берём первого пользователя с TG привязкой
-            import os as _os
-            user_id = f"cli-{_os.getuid()}"
-            existing = self.storage.get_user_by_uid(_os.getuid())
-            if existing:
-                user_id = existing["id"]
-            
-            # Получаем source_chat_id для TG — ищем по ВСЕМ пользователям
-            # т.к. CLI user (cli-1000) и TG user (user-tg-208118) могут быть разными
-            tg_chat_id = ""
+
+            # Рассылаем briefing каждому пользователю с активным TG-каналом.
+            # Раньше брали первый попавшийся telegram-канал (LIMIT 1 без ORDER BY)
+            # и генерировали контент для CLI-юзера (cli-1000), а отправляли в
+            # чужой TG — briefing уходил не тому пользователю.
             with self.storage._conn() as conn:
-                row = conn.execute(
-                    "SELECT source_chat_id FROM channels WHERE source = 'telegram' LIMIT 1",
-                ).fetchone()
-                if row:
-                    tg_chat_id = row["source_chat_id"]
-            
-            text = await briefing.generate_and_send(
-                user_id=user_id,
-                channel_id=tg_chat_id,
-            )
-            
-            self.log.info(f"Morning briefing sent ({len(text)} chars)")
+                rows = conn.execute(
+                    """SELECT user_id, source_chat_id FROM channels
+                       WHERE source = 'telegram' AND status = 'active'
+                         AND source_chat_id IS NOT NULL
+                         AND source_chat_id != ''""",
+                ).fetchall()
+            tg_channels = [dict(r) for r in rows]
+
+            if not tg_channels:
+                self.log.info("No active telegram channels — skipping briefing")
+                return
+
+            for ch in tg_channels:
+                try:
+                    text = await briefing.generate_and_send(
+                        user_id=ch["user_id"],
+                        channel_id=ch["source_chat_id"],
+                    )
+                    self.log.info(
+                        f"Morning briefing sent to user={ch['user_id']} "
+                        f"({len(text)} chars)"
+                    )
+                except Exception as e:
+                    self.log.error(
+                        f"Morning briefing failed for user={ch['user_id']}: {e}"
+                    )
         except Exception as e:
             self.log.error(f"Morning briefing failed: {e}")
     

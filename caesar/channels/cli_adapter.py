@@ -41,6 +41,8 @@ class CLISession:
         self.last_icon: str | None = None
         # task_id → Promise-результат для опроса статуса
         self.task_ids: list[str] = []
+        # Метка последней активности — для вытеснения простаивающих сессий
+        self.last_activity: datetime = datetime.now()
     
     async def emit(self, event: Event) -> None:
         """Получить event от ядра, положить в очередь клиенту."""
@@ -81,11 +83,19 @@ class CLIAdapter:
         self.log.info("CLI adapter started")
     
     async def stop(self) -> None:
+        # Отписываем и очищаем все сессии при остановке daemon-а
+        for sid, session in list(self._sessions.items()):
+            self.event_bus.unsubscribe(sid, session.emit)
+        self._sessions.clear()
         self.log.info("CLI adapter stopped")
     
     async def handle_request(self, request: dict) -> dict:
         action = request.get("action", "")
-        
+
+        # Вытесняем простаивающие сессии при любом обращении —
+        # иначе self._sessions растёт без ограничений (CLI session leak).
+        self._cleanup_stale_sessions()
+
         if action == "send_message":
             return await self._handle_send_message(request)
         elif action == "get_events":
@@ -189,6 +199,7 @@ class CLIAdapter:
             self.event_bus.subscribe(session_id, session.emit)
         else:
             session = self._sessions[session_id]
+        session.last_activity = datetime.now()
         
         # Определяем сложность (простая эвристика, потом заменится cheap LLM)
         complexity = self._estimate_complexity(message)
@@ -239,7 +250,8 @@ class CLIAdapter:
         session = self._sessions.get(session_id)
         if not session:
             return {"error": "unknown_session"}
-        
+
+        session.last_activity = datetime.now()
         events = []
         try:
             event = await asyncio.wait_for(
@@ -263,6 +275,24 @@ class CLIAdapter:
             "timestamp": event.timestamp.isoformat(),
             "data": event.data,
         }
+
+    # Сколько секунд сессия может простаивать без опроса, прежде чем её
+    # вытеснят. CLI-клиент опрашивает get_events активно; простаивающие
+    # сессии (закрытый терминал, упавший процесс) иначе копятся в памяти.
+    SESSION_TTL_SEC = 3600
+
+    def _cleanup_stale_sessions(self) -> None:
+        """Удалить сессии без активности дольше SESSION_TTL_SEC."""
+        now = datetime.now()
+        stale = [
+            sid for sid, s in self._sessions.items()
+            if (now - s.last_activity).total_seconds() > self.SESSION_TTL_SEC
+        ]
+        for sid in stale:
+            session = self._sessions.pop(sid, None)
+            if session:
+                self.event_bus.unsubscribe(sid, session.emit)
+                self.log.info(f"Evicted stale CLI session {sid}")
     
     async def _handle_get_status(self, request: dict) -> dict:
         """Расширенный статус: daemon, memory, cron, tokens, recent dialogs."""

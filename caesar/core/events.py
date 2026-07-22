@@ -126,14 +126,16 @@ class EventBus:
         Также все глобальные подписчики получат event.
         """
         # Сначала глобальные (логирование и т.д.)
-        for handler in self._log_subscribers:
+        # Копируем список: unsubscribe во время await может мутировать
+        # итерируемый список → гонка (RuntimeError/пропуск обработчиков).
+        for handler in list(self._log_subscribers):
             try:
                 await handler(event)
             except Exception:
                 pass  # не падаем из-за логгера
-        
-        # Потом подписчики канала
-        handlers = self._subscribers.get(channel_id, [])
+
+        # Потом подписчики канала — копируем по той же причине
+        handlers = list(self._subscribers.get(channel_id, []))
         for handler in handlers:
             try:
                 await handler(event)

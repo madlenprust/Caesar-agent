@@ -353,15 +353,30 @@ class DreamCycle:
                     ).fetchone()
                     if del_row:
                         del_name = del_row["name"]
-                        # Переносим relations
-                        conn.execute(
-                            "UPDATE kg_relations SET from_entity = ? WHERE from_entity = ? AND user_id = ?",
-                            (d["name"], del_name, user_id or "%"),
-                        )
-                        conn.execute(
-                            "UPDATE kg_relations SET to_entity = ? WHERE to_entity = ? AND user_id = ?",
-                            (d["name"], del_name, user_id or "%"),
-                        )
+                        # Переносим relations на оставшийся entity.
+                        # Если user_id задан — только этого пользователя;
+                        # иначе (ночной all-users dream) — ВСЕХ, иначе
+                        # `user_id or "%"` с оператором `=` не матчит ни одну
+                        # строку (user_id — реальный id, а не литерал "%"),
+                        # и relations остаются dangling на удалённом entity.
+                        if user_id:
+                            conn.execute(
+                                "UPDATE kg_relations SET from_entity = ? WHERE from_entity = ? AND user_id = ?",
+                                (d["name"], del_name, user_id),
+                            )
+                            conn.execute(
+                                "UPDATE kg_relations SET to_entity = ? WHERE to_entity = ? AND user_id = ?",
+                                (d["name"], del_name, user_id),
+                            )
+                        else:
+                            conn.execute(
+                                "UPDATE kg_relations SET from_entity = ? WHERE from_entity = ?",
+                                (d["name"], del_name),
+                            )
+                            conn.execute(
+                                "UPDATE kg_relations SET to_entity = ? WHERE to_entity = ?",
+                                (d["name"], del_name),
+                            )
                     
                     conn.execute("DELETE FROM kg_entities WHERE id = ?", (did,))
                 
@@ -387,30 +402,30 @@ class DreamCycle:
         fixed = 0
         
         with self.storage._conn() as conn:
-            # Чанки без hash
+            # Чанки без hash или с фейковым hash ('needs_recalc' от старой версии)
             rows = conn.execute(
-                """SELECT id, chunk_metadata FROM l3_chunks 
-                   WHERE chunk_metadata NOT LIKE '%hash%' LIMIT 100""",
+                """SELECT id, chunk_metadata, content FROM l3_chunks
+                   WHERE chunk_metadata NOT LIKE '%hash%'
+                      OR chunk_metadata LIKE '%needs_recalc%'
+                   LIMIT 100""",
             ).fetchall()
-            
+
             for row in rows:
                 d = dict(row)
                 try:
                     import hashlib
                     meta = json.loads(d.get("chunk_metadata") or "{}")
-                    
-                    # Добавляем hash если нет
-                    if "hash" not in meta:
-                        # Нужен content, но мы не загружаем его здесь для скорости
-                        # Просто помечаем что нужен hash
-                        meta["hash"] = "needs_recalc"
-                        with self.storage._conn() as conn2:
-                            conn2.execute(
-                                "UPDATE l3_chunks SET chunk_metadata = ? WHERE id = ?",
-                                (json.dumps(meta, ensure_ascii=False), d["id"]),
-                            )
-                            conn2.commit()
-                        fixed += 1
+
+                    # Реальный hash из content чанка (раньше писали 'needs_recalc' — no-op)
+                    content = d.get("content") or ""
+                    meta["hash"] = hashlib.sha256(content.encode()).hexdigest()[:16]
+                    with self.storage._conn() as conn2:
+                        conn2.execute(
+                            "UPDATE l3_chunks SET chunk_metadata = ? WHERE id = ?",
+                            (json.dumps(meta, ensure_ascii=False), d["id"]),
+                        )
+                        conn2.commit()
+                    fixed += 1
                 except Exception:
                     pass
         
