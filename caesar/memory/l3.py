@@ -174,6 +174,48 @@ def _cosine_similarity(a: list[float], b: list[float]) -> float:
     return dot / (norm_a * norm_b)
 
 
+def _cosine_batch(query_vec: list[float], chunk_vecs: list[list[float]]) -> list[float]:
+    """Batch cosine similarity между query и списком векторов чанков.
+
+    Использует numpy если доступен (один векторизованный вызов вместо O(N)
+    Python-цикла). Если numpy нет — fallback на _cosine_similarity поэлементно.
+    Также fallback если векторы разной длины (numpy не складывает в матрицу).
+
+    Возвращает список scores длиной len(chunk_vecs).
+    """
+    if not chunk_vecs:
+        return []
+    q_len = len(query_vec)
+    # Если векторы разной длины — numpy не сможет сложить их в матрицу,
+    # падаем на поэлементный fallback (он вернёт 0.0 для несовпадающих длин).
+    if any(len(v) != q_len for v in chunk_vecs):
+        return [_cosine_similarity(query_vec, v) for v in chunk_vecs]
+    try:
+        import numpy as np
+    except ImportError:
+        # numpy недоступен — fallback на чистый Python
+        return [_cosine_similarity(query_vec, v) for v in chunk_vecs]
+
+    try:
+        q = np.asarray(query_vec, dtype=np.float32)
+        mat = np.asarray(chunk_vecs, dtype=np.float32)  # (N, dim)
+        if mat.ndim != 2 or q.ndim != 1:
+            return [_cosine_similarity(query_vec, v) for v in chunk_vecs]
+        q_norm = float(np.linalg.norm(q))
+        if q_norm == 0.0:
+            return [0.0] * len(chunk_vecs)
+        norms = np.linalg.norm(mat, axis=1)  # (N,)
+        dots = mat @ q  # (N,)
+        # Защита от деления на ноль для нулевых векторов
+        safe_norms = np.where(norms == 0.0, 1.0, norms)
+        scores = dots / (safe_norms * q_norm)
+        scores = np.where(norms == 0.0, 0.0, scores)
+        return [float(s) for s in scores]
+    except Exception:
+        # Любая неожиданная ошибка numpy — не валим search, fallback
+        return [_cosine_similarity(query_vec, v) for v in chunk_vecs]
+
+
 def _chunk_text(text: str, size: int = CHUNK_SIZE, overlap: int = CHUNK_OVERLAP) -> list[str]:
     """Разбить текст на чанки с перекрытием."""
     if overlap >= size:
@@ -325,6 +367,7 @@ class L3Memory:
         boost_same_channel: float = 1.0,  # ОТКЛЮЧЕН — был баг: чанки из main получали буст над документами
         min_similarity: float = 0.15,  # минимальный порог — не возвращаем мусор
         recency_boost_enabled: bool = True,  # свежие чанки бустятся
+        kg: Any = None,  # Knowledge Graph — опционально, для KG-boost в ранжировании
     ) -> list[L3SearchResult]:
         """Поиск в L3.
 
@@ -342,6 +385,14 @@ class L3Memory:
         (последние 7 дней), он получает множитель 1.10. Если последние
         24 часа — 1.20. Это помогает боту предпочитать актуальные данные
         устаревшим. Отключается параметром recency_boost_enabled=False.
+
+        KG boost (опционально): если передан knowledge graph (kg), из запроса
+        извлекаются entities (kg.extract_entities). Чанки, в контенте которых
+        упоминается хотя бы одна entity из запроса, получают +15% (×1.15).
+        Это интегрирует Knowledge Graph в ранжирование L3 — релевантный
+        чанк с упоминанием нужной сущности поднимается выше. KG boost —
+        это relevance signal (может поднять чанк выше min_similarity),
+        в отличие от recency boost (только tiebreaker для уже прошедших фильтр).
 
         Возвращает пустой список если:
         - sentence-transformers не установлен
@@ -368,15 +419,22 @@ class L3Memory:
         # Текущее время для recency boost (вычисляем один раз)
         now = datetime.now() if recency_boost_enabled else None
 
-        # Загружаем все чанки пользователя (с created_at для recency)
+        # Загружаем последние 500 чанков пользователя (по rowid DESC — самые свежие).
+        # RAM-кэш векторов уже ограничен max_cache_size (по умолчанию 2000), здесь
+        # дополнительно ограничиваем загрузку КОНТЕНТА — нет смысла тащить всю историю
+        # в память ради cosine-сходства (свежие чанки релевантнее устаревших).
         with self.storage._conn() as conn:
             rows = conn.execute(
-                "SELECT id, content, channel, chunk_metadata, created_at FROM l3_chunks WHERE user_id = ?",
+                "SELECT id, content, channel, chunk_metadata, created_at "
+                "FROM l3_chunks WHERE user_id = ? ORDER BY rowid DESC LIMIT 500",
                 (user_id,),
             ).fetchall()
 
-        # Считаем similarity
-        scored: list[tuple[float, dict]] = []
+        # Собираем ВСЕ чанк-векторы в один список ПЕРЕД подсчётом similarity.
+        # Это позволяет посчитать cosine batch-ем (numpy, один векторизованный
+        # вызов) вместо O(N) Python-цикла с _cosine_similarity на каждой итерации.
+        chunk_data: list[dict] = []
+        chunk_vecs: list[list[float]] = []
         for row in rows:
             d = dict(row)
             chunk_id = d["id"]
@@ -395,8 +453,40 @@ class L3Memory:
                     continue
             if vec is None:
                 continue
+            chunk_data.append(d)
+            chunk_vecs.append(vec)
 
-            score = _cosine_similarity(query_vec, vec)
+        # KG boost: извлекаем entities из запроса через Knowledge Graph (если передан).
+        # Чанки, в контенте которых упоминается entity из запроса, получат +15%.
+        # Интегрирует KG в ранжирование L3 (audit: KG был не интегрирован в L3 search).
+        kg_entity_lower: list[str] = []
+        if kg is not None:
+            try:
+                # Спецификация: kg.extract_entities(query). KnowledgeGraph имеет
+                # такой метод (делегирует в модульную функцию).
+                ents = kg.extract_entities(query)
+                kg_entity_lower = [
+                    e["name"].lower() for e in ents if e.get("name") and len(e["name"]) >= 2
+                ]
+            except Exception:
+                # Fallback: kg может быть bare object/моком без метода, либо вызов
+                # упал. Пробуем модульную функцию напрямую (как в orchestrator).
+                try:
+                    from caesar.memory.knowledge_graph import extract_entities
+                    ents = extract_entities(query)
+                    kg_entity_lower = [
+                        e["name"].lower() for e in ents if e.get("name") and len(e["name"]) >= 2
+                    ]
+                except Exception:
+                    kg_entity_lower = []
+
+        # Batch cosine: один вызов для всех чанков (numpy если доступен,
+        # иначе fallback на поэлементный _cosine_similarity внутри _cosine_batch).
+        scores = _cosine_batch(query_vec, chunk_vecs)
+
+        # Применяем бусты и фильтр min_similarity
+        scored: list[tuple[float, dict]] = []
+        for score, d in zip(scores, chunk_data):
             # Channel boost — ОТКЛЮЧЕН по умолчанию (boost_same_channel=1.0)
             # Причина: документы в channel="documents", чаты в channel="main".
             # Буст main над documents приводил к тому что релевантные документы
@@ -408,6 +498,8 @@ class L3Memory:
             # <24h: ×1.20, <7d: ×1.10, иначе ×1.00.
             # Важно: буст НЕ поднимает чанк выше порога min_similarity —
             # мы применяем его только если чанк уже прошёл фильтр.
+            # Проверка делается по score ДО KG-boost (KG — отдельный relevance
+            # signal, он применяется ниже и может поднять чанк выше порога).
             if recency_boost_enabled and score >= min_similarity and now is not None:
                 created_at_str = d.get("created_at") or ""
                 if created_at_str:
@@ -426,6 +518,14 @@ class L3Memory:
                             score *= 1.10
                     except (ValueError, TypeError):
                         pass  # битая дата — пропускаем буст
+
+            # KG boost — relevance signal. Чанки где упоминается entity из
+            # запроса (case-insensitive) получают ×1.15. Может поднять чанк
+            # выше min_similarity (в отличие от recency boost).
+            if kg_entity_lower:
+                content_lower = (d.get("content") or "").lower()
+                if any(name in content_lower for name in kg_entity_lower):
+                    score *= 1.15
 
             # Минимальный порог — не возвращаем мусор
             if score >= min_similarity:

@@ -78,6 +78,27 @@ TOOL_ICONS = {
 # Сколько последних сообщений загружать в контекст
 CONVERSATION_HISTORY_LIMIT = 20
 
+# Токен-бюджеты для context packing (раздел 14.8 / L3 design-level improvements).
+# Заменяют фиксированную обрезку по символам ([:1000] для истории, [:300] для L3).
+# ~4 символа на токен для English/Russian — см. _est_tokens.
+L3_CONTEXT_TOKEN_BUDGET = 4000     # суммарный бюджет на L3-контекст в system prompt
+HISTORY_TOKEN_BUDGET = 2000        # суммарный бюджет на историю диалога
+L3_MAX_TOKENS_PER_CHUNK = 1500     # cap: один чанк не занимает весь L3-бюджет
+L3_MIN_TOKENS_PER_CHUNK = 200      # floor: даже низкий score получает минимум места
+HISTORY_MIN_TOKENS_PER_MSG = 100   # floor: даже при 20 сообщениях не режем ниже этого
+
+
+def _est_tokens(text: str) -> int:
+    """Оценка количества токенов в тексте.
+
+    Эвристика: ~4 символа на токен (работает для English и Russian — оба
+    языка токенизируются ~3.5-4.5 символа на токен у современных BPE-токенизаторов).
+    Точнее чем ничего и не требует загрузки токенизатора (быстро, 0 зависимостей).
+    """
+    if not text:
+        return 0
+    return len(text) // 4
+
 
 class Orchestrator:
     """Оркестратор задач.
@@ -556,16 +577,28 @@ class Orchestrator:
             recent = self.storage.get_messages(channel_id, limit=CONVERSATION_HISTORY_LIMIT)
             # Исключаем последнее сообщение — это текущий запрос пользователя
             # (мы его только что сохранили)
-            for msg in recent[:-1]:  # все кроме последнего
-                role = msg["role"]
-                content = msg["content"]
-                if role in ("user", "assistant") and content.strip():
-                    # Обрезаем каждое сообщение до 1000 символов — экономия на длинных ответах
-                    truncated = content[:1000] + ("..." if len(content) > 1000 else "")
-                    history_messages.append(LLMMessage(role=role, content=truncated))
-            
-            if history_messages:
+            history_raw = [
+                (msg["role"], msg["content"])
+                for msg in recent[:-1]  # все кроме последнего
+                if msg["role"] in ("user", "assistant") and msg["content"].strip()
+            ]
+            if history_raw:
                 has_history = True
+                # Token-aware packing: распределяем HISTORY_TOKEN_BUDGET между сообщениями.
+                # Замена фиксированной обрезки [:1000]: каждое сообщение получает
+                # ~budget/N токенов (max_tokens*4 символов). Не даём одному длинному
+                # ответу вытеснить весь контекст истории. N ещё не известно на момент
+                # цикла — считаем per-message бюджет один раз upfront.
+                n = len(history_raw)
+                per_msg_tokens = max(HISTORY_TOKEN_BUDGET // n, HISTORY_MIN_TOKENS_PER_MSG)
+                for role, content in history_raw:
+                    if _est_tokens(content) > per_msg_tokens:
+                        char_limit = per_msg_tokens * 4
+                        truncated = content[:char_limit].rstrip() + "..."
+                    else:
+                        truncated = content
+                    history_messages.append(LLMMessage(role=role, content=truncated))
+
                 self.log.info(f"Loaded {len(history_messages)} history messages for channel {channel_name}")
         
         # === ШАГ 2: Cheap LLM analyzer — анализируем запрос ДО умной LLM ===
@@ -654,6 +687,8 @@ class Orchestrator:
             try:
                 # Адаптивный L3: simple=3 чанка, medium/complex=5
                 l3_final_k = 3 if (analysis.get("complexity") or task.complexity) == "simple" else 5
+                # Передаём KG в L3 search — интегрирует knowledge graph в ранжирование:
+                # чанки с упоминанием entities из запроса получают +15% (см. l3.search).
                 l3_results = await self._l3.search(
                     query=task.user_message[:1000],
                     user_id=user_id,
@@ -661,12 +696,34 @@ class Orchestrator:
                     final_k=l3_final_k,
                     boost_same_channel=1.0,
                     min_similarity=0.15,
+                    kg=self._kg,
                 )
                 if l3_results:
                     l3_context = "Тебе доступны следующие материалы (используй их как свои знания):\n"
+                    # Score-aware token packing (замена фиксированной обрезки [:300]).
+                    # l3_results уже отсортированы по убыванию score (возвращается top из
+                    # search). Распределяем L3_CONTEXT_TOKEN_BUDGET пропорционально score:
+                    # чанки с более высоким score получают больше токенов. С cap/floor
+                    # на чанк — чтобы один гигантский чанк не вытеснил остальные, а
+                    # низкий-score чанк всё равно получил минимум для контекста.
+                    budget = L3_CONTEXT_TOKEN_BUDGET - _est_tokens(l3_context)
+                    total_score = sum(max(r.score, 0.01) for r in l3_results)
                     for r in l3_results:
-                        # Обрезаем чанки до 300 символов — экономия
-                        l3_context += f"{r.content[:300]}\n\n"
+                        if budget <= 0:
+                            break
+                        share = (
+                            max(r.score, 0.01) / total_score
+                            if total_score > 0
+                            else 1.0 / len(l3_results)
+                        )
+                        max_tokens = max(L3_MIN_TOKENS_PER_CHUNK, int(budget * share))
+                        max_tokens = min(max_tokens, L3_MAX_TOKENS_PER_CHUNK, budget)
+                        chunk_text = r.content
+                        if _est_tokens(chunk_text) > max_tokens:
+                            char_limit = max_tokens * 4
+                            chunk_text = chunk_text[:char_limit].rstrip() + "..."
+                        l3_context += f"{chunk_text}\n\n"
+                        budget -= _est_tokens(chunk_text) + _est_tokens("\n\n")
                     l3_context += "\n"
                     
                     # Gap Analysis: проверяем что мозг НЕ знает

@@ -374,12 +374,21 @@ class KnowledgeGraph:
         """Найти entities по имени (partial match)."""
         with self.storage._conn() as conn:
             rows = conn.execute(
-                """SELECT * FROM kg_entities 
-                   WHERE user_id = ? AND name LIKE ? 
+                """SELECT * FROM kg_entities
+                   WHERE user_id = ? AND name LIKE ?
                    ORDER BY mention_count DESC, last_seen DESC LIMIT ?""",
                 (user_id, f"%{query}%", limit),
             ).fetchall()
         return [dict(r) for r in rows]
+
+    def extract_entities(self, text: str) -> list[dict]:
+        """Извлечь entities из текста (делегирует в модульную функцию).
+
+        Обёртка для удобства вызова через инстанс: kg.extract_entities(query).
+        Используется в L3 search для KG-boost ранжирования: чанки, в контенте
+        которых упоминается entity из запроса, получают +15% к score.
+        """
+        return extract_entities(text)
     
     def get_relations(self, user_id: str, entity_name: str, direction: str = "both") -> list[dict]:
         """Получить связи entity.
