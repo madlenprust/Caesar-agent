@@ -1642,24 +1642,39 @@ async def _cmd_models_list(config) -> int:
 
 async def cmd_models(args) -> int:
     """Настройка smart и cheap моделей.
-    
-    caesar models        — интерактивная настройка
+
+    caesar models        — интерактивная настройка (legacy или multi-provider)
     caesar models list   — показать текущие и доступные модели
     """
     import httpx
     import yaml as _yaml
     from caesar.config import CONFIG_PATH, Config
-    
+
     config = Config.load(CONFIG_PATH)
-    
+
+    # Multi-provider: показываем провайдеров + ролы + предлагаем caesar provider
+    if config.llm.is_multi_provider():
+        print("🤖 LLM провайдеры (multi-provider):\n")
+        for p in config.llm.providers:
+            roles = []
+            if p.name == config.llm.smart_role.provider:
+                roles.append(f"smart={config.llm.smart_role.model}")
+            if p.name == config.llm.cheap_role.provider:
+                roles.append(f"cheap={config.llm.cheap_role.model}")
+            print(f"  {p.name} ({p.type})  [{'  '.join(roles) if roles else 'не назначен'}]")
+            if p.models:
+                print(f"    models: {', '.join(p.models)}")
+        print("\n💡 Для управления: caesar provider list / add / switch / remove")
+        return 0
+
     # === caesar models list ===
     if getattr(args, "models_action", None) == "list":
         return await _cmd_models_list(config)
-    
-    # === caesar models (без subcommand) — интерактивная настройка ===
-    print("🤖 Настройка LLM моделей")
+
+    # === caesar models (без subcommand) — интерактивная настройка (legacy) ===
+    print("🤖 Настройка LLM моделей (legacy-режим)")
     print("=" * 50)
-    
+
     # Текущие настройки
     print(f"\nТекущие настройки:")
     print(f"  Smart:  {config.llm.smart_provider} / {config.llm.smart_model}")
