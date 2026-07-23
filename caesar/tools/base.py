@@ -21,9 +21,14 @@ from typing import Any
 from caesar.logging_setup import get_logger
 
 
-# exact_deny — зашитый чёрный список необратимых операций (раздел 11.1).
+# exact_deny — чёрный список СНЯСА ЛОКАЛЬНОЙ СИСТЕМЫ (раздел 11.1).
 # Срабатывает ВСЕГДА, до выполнения, и НЕ отключается ни god_mode, ни full
 # (PRINCIPLES #9: «Не отключается через UI/чат»).
+# Политика: блокируем только снос машины, где крутится агент — rm -rf на корень/
+# системный каталог, fork bomb, chmod/chown -R на /, disable sshd/networking,
+# self-uninstall pip/npm. Форматирование диска (mkfs/dd of=/dev/>/dev) и снос
+# на СОСЕДНЕЙ машине (RemoteExecTool) — РАЗРЕШЕНЫ (владелец берёт ответственность;
+# soft-gate requires_permission в sandboxed спросит подтверждение).
 # Устойчив к обходам: chaining (&& ; | ||), command substitution ($(...) `...`),
 # eval "...", и reorder флагов (rm -fr /, rm -r -f /).
 
@@ -91,7 +96,12 @@ def _split_subcommands(command: str) -> list[str]:
 
 def _rm_recursive_force_targets(cmd: str) -> str | None:
     """Если cmd = rm с рекурсией И форсированием (любой порядок/группировка флагов)
-    на защищённый путь — вернуть этот путь, иначе None.
+    на КОРЕНЬ системы/дома — вернуть этот путь, иначе None.
+
+    Политика roots-only: блокируем только снос системы — rm -rf на корень (/)
+    или системный каталог верхнего уровня (/etc, /usr, /var, /home, ...), либо на
+    корень дома (~, ~user). Подкаталоги (~/old_project, /var/log/old) разрешены —
+    это легитимная зачистка, не снос системы.
     """
     try:
         argv = shlex.split(cmd, posix=True)
@@ -115,29 +125,36 @@ def _rm_recursive_force_targets(cmd: str) -> str | None:
     if not ("r" in flag_chars and "f" in flag_chars):
         return None
     for t in targets:
+        # /tmp, /var/tmp — всегда разрешены
         if any(t == p or t.startswith(p + "/") for p in _RM_ALLOWED_TMP):
             continue
-        if t == "~" or t == "/" or any(t == p or t.startswith(p + "/") for p in _RM_PROTECTED_PREFIXES if p != "/"):
+        # Нормализуем хвостовой слэш: /etc/ → /etc; // → "" (корень).
+        tn = t.rstrip("/")
+        # Снос системы = rm -rf на КОРЕНЬ: /, системный каталог верхнего уровня
+        # (/etc, /usr, /var, /home, ...) или корень дома (~, ~user).
+        # Подкаталоги (~/old_project, /var/log/old) — НЕ блокируем.
+        if tn == "" or tn == "~" or tn in _RM_PROTECTED_PREFIXES:
             return t
-        if t.startswith("~"):  # ~, ~/..., ~user/...
+        # ~user (корень чужого дома). Подкаталог ~user/x — разрешён.
+        if re.match(r"^~\w+$", tn):
             return t
     return None
 
 
 # Паттерны (не-rm), проверяемые по каждой изолированной под-команде.
+# Только СНЯС ЛОКАЛЬНОЙ СИСТЕМЫ. Форматирование диска (mkfs/dd of=/dev/>/dev)
+# ЗДЕСЬ НЕТ — оно разрешено (владелец берёт ответственность; sandboxed спросит
+# подтверждение через requires_permission).
 _DENY_PER_SUBCMD: list[tuple[re.Pattern, str]] = [
-    (re.compile(r"^mkfs\.\w+\s+/dev/"), "mkfs на блочное устройство"),
-    (re.compile(r"^dd\s+if=\S*\s+of=/dev/"), "dd of= в устройство"),
     (re.compile(r"^:\s*\(\s*\)\s*\{.*\}.*;.*:"), "fork bomb :(){ :|:& };:"),
     (re.compile(r"^chmod\s+-R\s+(?:000|777)\s+/(?!tmp/|var/tmp/)"), "chmod -R 000/777 /"),
     (re.compile(r"^chown\s+-R\s+\S+\s+/(?!tmp/|var/tmp/)"), "chown -R /"),
     (re.compile(r"^systemctl\s+(?:disable|mask)\s+(?:sshd|networking|systemd-network)\b"), "disable sshd/networking"),
-    (re.compile(r"^>\s*/dev/(?:sd|nvme|hd|vd)"), "redirect в блочное устройство"),
     (re.compile(r"^pip\s+uninstall\s+-y\s+pip\b"), "uninstall pip"),
     (re.compile(r"^npm\s+uninstall\s+-g\s+npm\b"), "uninstall npm"),
-    # интерпретаторы -c/-e с деструктивом
-    (re.compile(r"^(?:bash|sh|zsh|dash)\s+-c\b.*\b(?:rm\s+-r|mkfs|dd\s+if=|chmod\s+-R|chown\s+-R|>\s*/dev/)"), "sh -c с деструктивом"),
-    (re.compile(r"^(?:python3?|node|ruby|perl)\s+-\w*[ec]\b.*\b(os\.system|subprocess|os\.remove|shutil\.rmtree|os\.unlink)"), "interp -c с деструктивом"),
+    # sh -c как попытка обойти прямой запрет на снос системы (rm -r/chmod-R/chown-R).
+    # mkfs/dd не ловим — форматирование диска разрешено.
+    (re.compile(r"^(?:bash|sh|zsh|dash)\s+-c\b.*\b(?:rm\s+-r|chmod\s+-R|chown\s+-R)"), "sh -c со сносом системы"),
 ]
 
 

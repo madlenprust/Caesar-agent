@@ -47,21 +47,23 @@ class ShellExecTool(Tool):
     }
     
     async def execute(self, command: str, timeout: int = 30, cwd: str | None = None, **_) -> ToolResult:
-        # exact_deny (rm -rf /, mkfs, dd of=/dev/, chmod -R 777 /, ...) защищает
-        # sandboxed-режим (по умолчанию). В full/god_mode — отключается: это
-        # явное «могу всё» владельца. Бот привязан (caesar pair) → god только у
-        # owner, поэтому attack-surface ограничен владельцем.
+        # exact_deny (снос ЛОКАЛЬНОЙ системы: rm -rf /, fork bomb, chmod/chown -R /,
+        # disable sshd/networking, self-uninstall pip/npm) — ВСЕГДА, даже в
+        # full/god_mode. Единственное, что ограничивает владельца, и стоит 0 в
+        # реальных возможностях (агенту это никогда не нужно).
+        # Форматирование диска (mkfs/dd of=/dev) и снос на СОСЕДНЕЙ машине
+        # (remote_exec) — разрешены (не в списке; в sandboxed спросит requires_permission).
+        is_dangerous, pattern = is_dangerous_command(command)
+        if is_dangerous:
+            return ToolResult(
+                success=False,
+                error=f"BLOCKED (exact_deny): снос локальной системы. {pattern}. "
+                      f"Не отключается даже в god/full. "
+                      f"На удалённой машине — используй remote_exec.",
+            )
+        # Эксфильтрация секретов (~/.ssh, config с ключами, /etc/shadow, .env) —
+        # мягкий гейт, только sandboxed (god/full обходит: владелец берёт ответственность).
         if self.access_mode != "full" and not self.god_mode:
-            is_dangerous, pattern = is_dangerous_command(command)
-            if is_dangerous:
-                return ToolResult(
-                    success=False,
-                    error=f"BLOCKED (exact_deny): необратимая операция. {pattern}. "
-                          f"В sandboxed не отключается. Для полного доступа — "
-                          f"god mode ('газ в пол') или mode: full в config.yaml.",
-                )
-            # Защита от эксфильтрации секретов (~/.ssh, config с ключами, /etc/shadow, .env).
-            # В god/full обходит — владелец берёт ответственность.
             if references_secret_path(command):
                 return ToolResult(
                     success=False,

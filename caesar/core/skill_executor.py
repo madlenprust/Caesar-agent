@@ -263,20 +263,25 @@ class SkillExecutor:
             )
     
     def _sandbox_blocked(self, command: str) -> str | None:
-        """В sandboxed (без god) — блокировать деструктив/эксфильтрацию в шагах
-        скилла. god/full обходит (как shell_exec). Возвращает reason или None.
+        """Проверить шаг скилла на снос системы / секретные пути.
+
+        exact_deny (снос ЛОКАЛЬНОЙ системы) — ВСЕГДА, даже в god/full
+        (как shell_exec). Секретные пути — мягкий гейт, только sandboxed
+        (god/full обходит). Возвращает reason или None.
         """
         if not self.tools:
             return None
+        # exact_deny (снос локальной системы) — всегда, даже в god/full.
+        from caesar.tools.base import is_dangerous_command, references_secret_path
+        dd, pat = is_dangerous_command(command)
+        if dd:
+            return f"exact_deny ({pat})"
+        # Секретные пути — только sandboxed (god/full обходит).
         if getattr(self.tools, "access_mode", "sandboxed") == "full":
             return None
         shell_tool = self.tools.get("shell_exec") if hasattr(self.tools, "get") else None
         if getattr(shell_tool, "god_mode", False):
             return None
-        from caesar.tools.base import is_dangerous_command, references_secret_path
-        dd, pat = is_dangerous_command(command)
-        if dd:
-            return f"exact_deny ({pat})"
         if references_secret_path(command):
             return "секретный путь (sandboxed)"
         return None

@@ -207,9 +207,12 @@ class ToolRegistry:
           Это его сервер, его правила.
         - access_mode='sandboxed' (по умолчанию) — проверяет requires_permission.
           LLM не может выполнить опасные команды без подтверждения.
-        - is_dangerous_command (rm -rf /, mkfs, ...) блокируется в sandboxed.
-          В full/god_mode отключается — владелец (бот привязан → god только у
-          owner) берёт ответственность за любые команды.
+        - is_dangerous_command (СНОС ЛОКАЛЬНОЙ системы: rm -rf /, fork bomb,
+          chmod/chown -R /, disable sshd/networking, self-uninstall pip/npm)
+          блокируется ВСЕГДА — даже в full/god_mode. Это единственное, что
+          ограничивает владельца, и стоит 0 (агенту это не нужно).
+          Форматирование диска (mkfs/dd) и снос на СОСЕДНЕЙ машине (remote_exec)
+          — РАЗРЕШЕНЫ (в sandboxed спросит requires_permission, god/full — сразу).
         """
         tool = self._tools.get(name)
         if not tool:

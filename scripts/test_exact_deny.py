@@ -8,7 +8,7 @@ import pytest
 
 from caesar.tools.base import is_dangerous_command
 
-# Команды, которые ДОЛЖНЫ блокироваться (в т.ч. известные обходы).
+# Команды, которые ДОЛЖНЫ блокироваться (снос ЛОКАЛЬНОЙ системы + обходы).
 DENY = [
     pytest.param("rm -rf /", id="rm-rf-root"),
     pytest.param("rm -rf /etc", id="rm-rf-etc"),
@@ -18,38 +18,45 @@ DENY = [
     pytest.param("rm -rf ~", id="rm-rf-home-tilde"),
     pytest.param("rm -fr /", id="rm-fr-reorder"),          # обход: порядок флагов
     pytest.param("rm -r -f /etc", id="rm-r-f-split"),      # обход: флаги отдельно
-    pytest.param("rm -rf /usr/local", id="rm-rf-usr-subdir"),
+    pytest.param("rm -rf /etc/", id="rm-rf-etc-trailing-slash"),  # обход: хвостовой /
     pytest.param("cd /tmp && rm -rf /", id="chain-amp"),   # обход: &&
     pytest.param("echo x; rm -rf /etc", id="chain-semicolon"),  # обход: ;
     pytest.param("true | rm -rf /home", id="chain-pipe"),  # обход: |
     pytest.param("$(rm -rf /home)", id="cmd-subst"),       # обход: $(...)
     pytest.param("`rm -rf /`", id="backticks"),            # обход: `...`
     pytest.param('eval "rm -rf /var"', id="eval"),         # обход: eval
-    pytest.param("mkfs.ext4 /dev/sda", id="mkfs-dev"),
-    pytest.param("dd if=/dev/zero of=/dev/sda", id="dd-to-dev"),
     pytest.param("chmod -R 777 /", id="chmod-777-root"),
     pytest.param("chmod -R 000 /", id="chmod-000-root"),
     pytest.param("chown -R user /", id="chown-root"),
     pytest.param(":(){ :|:& };:", id="fork-bomb"),
     pytest.param('bash -c "rm -rf /home"', id="bash-c-rm"),
     pytest.param('sh -c "rm -rf /etc"', id="sh-c-rm"),
-    pytest.param('python3 -c "import os; os.system(\'rm -rf /\')"', id="py-c-os-system"),
     pytest.param("pip uninstall -y pip", id="uninstall-pip"),
-    pytest.param("> /dev/sda", id="redirect-to-block-dev"),
     pytest.param("systemctl disable sshd", id="disable-sshd"),
 ]
 
-# Команды, которые НЕ должны блокироваться exact_deny (безопасные или /tmp).
+# Команды, которые НЕ должны блокироваться exact_deny.
+# Политика roots-only: подкаталоги системных путей (~/.old, /var/log/old) — разрешены.
+# Форматирование диска (mkfs/dd/>/dev) и interp -c — разрешены (владелец отвечает в god/full).
 ALLOW = [
     pytest.param("ls -la /", id="ls"),
     pytest.param("cat /etc/hostname", id="cat-etc-hostname"),
     pytest.param("rm -rf /tmp/foo", id="rm-rf-tmp"),
     pytest.param("rm -rf /var/tmp/x", id="rm-rf-var-tmp"),
     pytest.param("rm -rf ./build", id="rm-rf-rel-build"),
+    pytest.param("rm -rf /usr/local", id="rm-rf-usr-subdir"),          # roots-only: подкаталог
+    pytest.param("rm -rf /var/log/old", id="rm-rf-var-log-subdir"),    # roots-only: подкаталог
+    pytest.param("rm -rf /home/alex/project", id="rm-rf-home-user-subdir"),  # roots-only
+    pytest.param("rm -rf ~/old_project", id="rm-rf-home-subdir"),      # roots-only: ~/x разрешён
     pytest.param("rm file.txt", id="rm-single-no-rf"),
     pytest.param("chmod 644 file", id="chmod-no-R"),
     pytest.param("chmod -R 755 dir", id="chmod-R-755"),
     pytest.param("mkfs.ext4 /mnt/usb", id="mkfs-mnt"),
+    pytest.param("mkfs.ext4 /dev/sda", id="mkfs-dev"),                 # форматирование диска
+    pytest.param("dd if=/dev/zero of=/dev/sda", id="dd-to-dev"),       # образ на диск
+    pytest.param("> /dev/sda", id="redirect-to-block-dev"),           # запись на диск
+    pytest.param('python3 -c "import os; os.system(\'rm -rf /\')"',
+                 id="py-c-os-system"),  # interp -c более не ловится (god/full — ответственность владельца)
     pytest.param("pip install requests", id="pip-install"),
     pytest.param("sudo apt update", id="sudo-apt-update"),
     pytest.param("git pull", id="git-pull"),

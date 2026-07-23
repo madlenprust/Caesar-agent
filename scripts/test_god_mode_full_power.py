@@ -1,6 +1,7 @@
-"""god mode = полная мощность: обходит exact_deny; remote_exec в sandboxed
-запрещён, в god — выполняет. Subprocess мокается, чтобы rm -rf /etc не выполнялся
-по-настоящему.
+"""god mode = полная мощность: обходит МЯГКИЕ гейты (requires_permission,
+references_secret_path), но НЕ exact_deny — снос локальной системы всегда включён.
+Диск-format (mkfs/dd) разрешён; rm -rf /etc блок даже в god/full.
+remote_exec в sandboxed запрещён, в god — выполняет. Subprocess мокается.
 """
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -25,24 +26,34 @@ async def test_sandboxed_blocks_rm_rf():
     assert "exact_deny" in r.error
 
 
-async def test_god_mode_bypasses_exact_deny_gate():
-    """god mode — exact_deny пропускается; subprocess мокнут, до реального rm не доходит."""
+async def test_god_mode_does_not_bypass_system_wipe():
+    """exact_deny (снос системы) — всегда включён, god НЕ обходит."""
+    t = ShellExecTool()
+    t.access_mode = "sandboxed"
+    t.god_mode = True
+    r = await t.execute(command="rm -rf /etc")
+    assert not r.success
+    assert "exact_deny" in r.error
+
+
+async def test_full_mode_does_not_bypass_system_wipe():
+    """full mode тоже не обходит снос системы."""
+    t = ShellExecTool()
+    t.access_mode = "full"
+    t.god_mode = False
+    r = await t.execute(command="rm -rf /etc")
+    assert not r.success
+    assert "exact_deny" in r.error
+
+
+async def test_god_mode_allows_disk_format():
+    """Форматирование диска (mkfs) разрешено в god — subprocess мокнут."""
     t = ShellExecTool()
     t.access_mode = "sandboxed"
     t.god_mode = True
     with patch("caesar.tools.shell_files.asyncio.create_subprocess_shell",
                AsyncMock(return_value=_fake_proc(0))):
-        r = await t.execute(command="rm -rf /etc")
-    assert r.success  # gate bypassed → (mocked) subprocess ran
-
-
-async def test_full_mode_bypasses_exact_deny_gate():
-    t = ShellExecTool()
-    t.access_mode = "full"
-    t.god_mode = False
-    with patch("caesar.tools.shell_files.asyncio.create_subprocess_shell",
-               AsyncMock(return_value=_fake_proc(0))):
-        r = await t.execute(command="rm -rf /etc")
+        r = await t.execute(command="mkfs.ext4 /dev/sda")
     assert r.success
 
 
