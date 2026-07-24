@@ -25,7 +25,7 @@
 не ломая DB-backed дизайн (L1-L4 + KG canonical). Крадём **слой прозрачности**,
 НЕ markdown-vault-as-primary-storage.
 
-**T1. Категоризация L2** (`decision` / `win` / `incident` / `fact` / `preference`).
+**T1. Категоризация L2** (`decision` / `win` / `incident` / `fact` / `preference`). ✅ DONE (0.12.0)
 - Миграция: колонка `category` в `l2_facts` (дефолт `fact` для существующих).
 - `LLMRouter.extract_facts`: классифицировать каждый факт по категории.
 - Dream Cycle + Morning Briefing: секции «решения за неделю / победы / инциденты».

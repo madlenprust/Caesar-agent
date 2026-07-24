@@ -78,7 +78,12 @@ class MorningBriefing:
         cron_tasks = self._collect_cron_tasks(user_id)
         if cron_tasks:
             sections.append(cron_tasks)
-        
+
+        # 7. (T1) Решения/победы/инциденты за неделю — из категоризировованных L2-фактов.
+        events = self._collect_recent_events(user_id)
+        if events:
+            sections.append(events)
+
         # Формируем итоговый текст
         if not sections:
             briefing = (
@@ -197,7 +202,48 @@ class MorningBriefing:
             fails = f.get("consecutive_failures", 0)
             lines.append(f"  • {task} — {fails} неудач подряд")
         return "\n".join(lines)
-    
+
+    def _collect_recent_events(self, user_id: str) -> str | None:
+        """(T1) Решения/победы/инциденты за последние 7 дней (из категоризованных L2)."""
+        try:
+            with self.storage._conn() as conn:
+                rows = conn.execute(
+                    """SELECT entity, attribute, value, category, valid_from
+                       FROM l2_facts
+                       WHERE user_id = ? AND category IN ('decision','win','incident')
+                         AND valid_from > datetime('now','-7 days')
+                         AND valid_until IS NULL
+                       ORDER BY valid_from DESC LIMIT 20""",
+                    (user_id,),
+                ).fetchall()
+            if not rows:
+                return None
+            return self._format_recent_events([dict(r) for r in rows])
+        except Exception as e:
+            self.log.warning(f"Failed to collect recent events: {e}")
+            return None
+
+    def _format_recent_events(self, events: list[dict]) -> str:
+        """Сгруппировать события по категории и отформатировать."""
+        labels = {"decision": "Решения", "win": "Победы", "incident": "Инциденты"}
+        groups: dict[str, list[dict]] = {"decision": [], "win": [], "incident": []}
+        for e in events:
+            cat = e.get("category", "fact")
+            if cat in groups:
+                groups[cat].append(e)
+        parts: list[str] = []
+        for cat in ("decision", "win", "incident"):
+            items = groups[cat]
+            if not items:
+                continue
+            parts.append(f"{labels[cat]} ({len(items)}):")
+            for e in items[:8]:
+                txt = f"{e.get('entity','?')} — {e.get('attribute','?')}: {e.get('value','')}"[:90]
+                parts.append(f"  • {txt}")
+            if len(items) > 8:
+                parts.append(f"  … и ещё {len(items) - 8}")
+        return "\n".join(parts)
+
     def _collect_token_usage(self) -> str | None:
         """Собрать статистику токенов за вчера."""
         try:

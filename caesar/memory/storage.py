@@ -129,6 +129,7 @@ CREATE TABLE IF NOT EXISTS l2_facts (
     tags TEXT,                      -- JSON array
     summary TEXT,
     confidence TEXT,                -- high | medium
+    category TEXT DEFAULT 'fact',   -- T1: fact | decision | win | incident | preference
     seq INTEGER                    -- для сортировки новых вперёд
 );
 
@@ -344,6 +345,17 @@ class Storage:
             except Exception as e:
                 self.log.warning(f"Migration consecutive_failures failed: {e}")
 
+            # Миграция (T1): добавляем category колонку в l2_facts
+            # (fact | decision | win | incident | preference). Дефолт 'fact' — для
+            # существующих записей (старые факты были без категории → это просто факты).
+            try:
+                l2_columns = [row["name"] for row in conn.execute("PRAGMA table_info(l2_facts)").fetchall()]
+                if "category" not in l2_columns:
+                    conn.execute("ALTER TABLE l2_facts ADD COLUMN category TEXT DEFAULT 'fact'")
+                    self.log.info("Migration: added category column to l2_facts table")
+            except Exception as e:
+                self.log.warning(f"Migration l2_facts.category failed: {e}")
+
             # Миграция: добавляем индексы для скорости /status
             try:
                 conn.execute("CREATE INDEX IF NOT EXISTS idx_tasks_created_at ON tasks(created_at DESC)")
@@ -494,15 +506,21 @@ class Storage:
         author_id: str | None = None,
         source_msg_id: str | None = None,
         tags: list[str] | None = None,
-        summary: str | None = None
+        summary: str | None = None,
+        category: str = "fact"
     ) -> dict:
         """Добавить факт. См. roadmap раздел 6.6 (lazy consolidation).
-        
+
+        category (T1): fact | decision | win | incident | preference.
+        LLM-извлечение классифицирует; неизвестные значения → 'fact'.
+
         Логика:
         - Если есть активный факт с тем же entity+attribute и тем же value → duplicate
         - Если есть с другим value → старый инвалидим (superseded), новый добавляем
         - Если нет → добавляем
         """
+        # Clamp категории к разрешённым (LLM может прислать мусор).
+        cat = category if category in {"fact", "decision", "win", "incident", "preference"} else "fact"
         with self._conn() as conn:
             # M2 (audit): сериализовать read-modify-write (supersede). Без этого два
             # писателя (юзер-ход + dream@2:00) могут оба прочитать «один активный
@@ -530,11 +548,11 @@ class Storage:
                 seq = (row["seq"] or 0) + 1
                 conn.execute("""
                     INSERT INTO l2_facts (id, user_id, channel, author_id, entity, attribute, value,
-                                          source_msg_id, tags, summary, confidence, seq)
-                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                          source_msg_id, tags, summary, confidence, category, seq)
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                 """, (
                     new_id, user_id, channel, author_id, entity, attribute, value,
-                    source_msg_id, json.dumps(tags or []), summary, confidence, seq
+                    source_msg_id, json.dumps(tags or []), summary, confidence, cat, seq
                 ))
                 return {"status": "superseded", "fact_id": new_id, "superseded_fact_id": row["id"]}
             
@@ -547,11 +565,11 @@ class Storage:
             ).fetchone()[0]
             conn.execute("""
                 INSERT INTO l2_facts (id, user_id, channel, author_id, entity, attribute, value,
-                                      source_msg_id, tags, summary, confidence, seq)
-                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                      source_msg_id, tags, summary, confidence, category, seq)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             """, (
                 new_id, user_id, channel, author_id, entity, attribute, value,
-                source_msg_id, json.dumps(tags or []), summary, confidence, max_seq + 1
+                source_msg_id, json.dumps(tags or []), summary, confidence, cat, max_seq + 1
             ))
             return {"status": "created", "fact_id": new_id}
     

@@ -623,26 +623,42 @@ class LLMRouter:
             '  "entity": "о чём факт",\n'
             '  "attribute": "что именно",\n'
             '  "value": "значение",\n'
+            '  "category": "fact|decision|win|incident|preference",\n'
             '  "confidence": "high|medium|low",\n'
             '  "source_quote": "точная цитата из диалога"\n'
             "}]\n\n"
-            "Если конкретных решений нет — верни пустой массив []."
+            "category:\n"
+            "  decision — принятое решение/выбор;\n"
+            "  win — достигнутый успех/результат;\n"
+            "  incident — сбой/инцидент/проблема;\n"
+            "  preference — указание/предпочтение юзера (надолго);\n"
+            "  fact — прочий конкретный факт (по умолчанию).\n\n"
+            "Если конкретных решений/фактов нет — верни пустой массив []."
         )
-        
+
         messages = [
             LLMMessage(role="system", content=system),
             LLMMessage(role="user", content=dialog_text),
         ]
-        
+
         try:
             resp = await self.cheap.chat(messages, temperature=0.1, max_tokens=2000)
             content = resp.content.strip()
             if content.startswith("```"):
                 content = content.split("\n", 1)[1].rsplit("```", 1)[0].strip()
-            
+
             facts = json.loads(content)
-            # Фильтруем low confidence (вариант C, раздел 6.6)
-            return [f for f in facts if f.get("confidence") in ("high", "medium")]
+            # Фильтруем low confidence (вариант C, раздел 6.6). Clamp category (T1):
+            # LLM может прислать мусор/пропустить → дефолт 'fact'.
+            _CATS = {"fact", "decision", "win", "incident", "preference"}
+            out = []
+            for f in facts:
+                if f.get("confidence") not in ("high", "medium"):
+                    continue
+                if f.get("category") not in _CATS:
+                    f["category"] = "fact"
+                out.append(f)
+            return out
         except (json.JSONDecodeError, RuntimeError) as e:
             self.log.warning(f"Fact extraction failed: {e}")
             return []
