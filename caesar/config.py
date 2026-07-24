@@ -27,12 +27,14 @@ HOME = Path.home()
 # Код: parent от этого файла (caesar/config.py → caesar/ → корень проекта)
 CODE_DIR = Path(__file__).resolve().parent.parent
 
-# Директории — ВСЁ ВНУТРИ ПАПКИ ПРОЕКТА (~/caesar/), не раскидано по системе.
-# Переопределение через env всё ещё работает (для multi-user/dev).
-DATA_DIR = Path(os.environ.get("CAESAR_DATA_DIR", str(CODE_DIR / "data")))
-CONFIG_DIR = Path(os.environ.get("CAESAR_CONFIG_DIR", str(CODE_DIR)))
-LOG_DIR = Path(os.environ.get("CAESAR_LOG_DIR", str(CODE_DIR / "data" / "log")))
-RUN_DIR = Path(os.environ.get("CAESAR_RUN_DIR", str(CODE_DIR / "data")))
+# Директории — XDG-user-space (см. docstring выше). Default'ы совпадают с тем,
+# что systemd прокидывает через env — чтобы CLI (без env) и daemon смотрели в
+# ОДНО место. Раньше default был CODE_DIR/data → CLI плодил stray-БД.
+# Переопределение через env всё ещё работает (multi-user/dev).
+DATA_DIR = Path(os.environ.get("CAESAR_DATA_DIR", str(HOME / ".local" / "share" / "caesar" / "data")))
+CONFIG_DIR = Path(os.environ.get("CAESAR_CONFIG_DIR", str(HOME / ".config" / "caesar")))
+LOG_DIR = Path(os.environ.get("CAESAR_LOG_DIR", str(HOME / ".local" / "share" / "caesar" / "log")))
+RUN_DIR = Path(os.environ.get("CAESAR_RUN_DIR", str(HOME / ".local" / "share" / "caesar" / "data")))
 
 # Сокет — в RUN_DIR
 SOCKET_PATH = RUN_DIR / "caesar.sock"
