@@ -1345,7 +1345,24 @@ class Orchestrator:
         
         if history_count > 0:
             prompt += f"\nВ истории диалога {history_count} предыдущих сообщений. Учитывай их при ответе.\n"
-        
+
+        # (T2) User-curated knowledge (manual/ overlay) — high-priority, авторитетно.
+        # Юзер пишет в ~/caesar/mind/manual/*.md то, что агент должен всегда знать
+        # (приоритет над извлечёнными L2-фактами). Аналог AGENTS.md, но для памяти.
+        try:
+            if not hasattr(self, "_mind_mirror") or self._mind_mirror is None:
+                from caesar.memory.mind_mirror import MindMirror
+                self._mind_mirror = MindMirror(self.storage, kg=getattr(self, "kg", None))
+            manual = self._mind_mirror.load_manual_context()
+            if manual:
+                prompt += (
+                    "\n📋 ЗНАНИЯ ОТ ПОЛЬЗОВАТЕЛЯ (curated, авторитетно — "
+                    "приоритет над извлечёнными фактами):\n"
+                    f"{manual}\n"
+                )
+        except Exception as e:
+            self.log.warning(f"Failed to load manual mind overlay: {e}")
+
         if memory_context:
             prompt += f"\n{memory_context}\n"
         

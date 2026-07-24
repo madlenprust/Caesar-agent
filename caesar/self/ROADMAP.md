@@ -32,10 +32,10 @@
 - *Лучше, чем у obsidian-mind*: L2 temporal (`valid_from`/`valid_until`) → у решений
   таймлайн и supersession (новое решение перекрывает старое); у плоских md-заметок этого нет.
 
-**T2. Markdown-зеркало `~/caesar/mind/` (projection + curated overlay).**
+**T2. Markdown-зеркало `~/caesar/mind/` (projection + curated overlay).** ✅ DONE (0.12.1)
 - `auto/` — read-only проекция L2+KG: `entities/<name>.md` (факты + relations как
   wikilinks), `decisions/`, `wins/`, `incidents/`. Регенерируется фазой Dream Cycle
-  (после entity dedup) + по требованию `caesar memory export`.
+  (после entity dedup) + по требованию `caesar mind export`.
 - `manual/` — user-curated; агент читает как авторитетные high-priority факты
   (аналог AGENTS.md). Правки юзера = прямой редактор «что агент должен всегда знать».
 - НЕ two-way sync проекции (кошмар с temporal/vector структурой). Только curated overlay.

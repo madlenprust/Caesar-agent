@@ -143,7 +143,19 @@ class DreamCycle:
                 self.log.error(f"Phase 6 (stale entities) failed: {e}")
         else:
             report["stale_entities"] = 0
-        
+
+        # Phase 7 (T2): Mind Mirror — регенерируем Markdown-проекцию памяти (auto/).
+        # После всех consolidate-фаз — факты/сущности свежие. manual/ не трогает.
+        try:
+            from caesar.memory.mind_mirror import MindMirror
+            mirror = MindMirror(self.storage, kg=getattr(self, "kg", None))
+            m = mirror.export()
+            report["mind_mirror"] = m
+            self.log.info(f"Phase 7 (mind mirror): facts={m['facts']} "
+                          f"entities={m['entities']} relations={m['relations']}")
+        except Exception as e:
+            self.log.error(f"Phase 7 (mind mirror) failed: {e}")
+
         report["duration_sec"] = (datetime.now() - start_time).total_seconds()
         
         self.log.info(

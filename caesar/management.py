@@ -2861,6 +2861,27 @@ async def cmd_config(args) -> int:
     return 0 if not issues else 1
 
 
+async def cmd_mind(args) -> int:
+    """Mind Mirror — Markdown-проекция памяти (T2)."""
+    from caesar.memory.storage import Storage
+    from caesar.memory.mind_mirror import MindMirror
+
+    action = getattr(args, "mind_action", None)
+    if action != "export":
+        print("usage: caesar mind export")
+        return 1
+
+    storage = Storage()
+    mirror = MindMirror(storage)
+    counts = mirror.export()
+    print(f"🧠 Mind Mirror экспортирован → {mirror.auto}")
+    print(f"   фактов: {counts['facts']}, сущностей: {counts['entities']}, "
+          f"связей: {counts['relations']}")
+    print(f"   auto/ — read-only проекция (регенерируется dream-циклом и `caesar mind export`)")
+    print(f"   {mirror.manual}/ — пиши туда curated-факты (агент читает как high-priority)")
+    return 0
+
+
 async def cmd_kg(args) -> int:
     """Управление Knowledge Graph."""
     from caesar.memory.storage import Storage
@@ -3084,6 +3105,11 @@ async def main_async() -> int:
     p_kg_sub.add_parser("stale", help="Stale entities (>30 дней)")
     p_kg_sub.add_parser("cleanup", help="Удалить stale entities (>60 дней)")
 
+    # mind — Mind Mirror (Markdown-проекция памяти, T2)
+    p_mind = subparsers.add_parser("mind", help="Mind Mirror — проекция памяти в Markdown")
+    p_mind_sub = p_mind.add_subparsers(dest="mind_action", required=True)
+    p_mind_sub.add_parser("export", help="Сгенерировать auto/ проекцию из L2+KG")
+
     # provider — управление LLM провайдерами (multi-provider)
     p_provider = subparsers.add_parser("provider", help="Управление LLM провайдерами")
     p_provider_sub = p_provider.add_subparsers(dest="provider_action", required=True)
@@ -3135,6 +3161,8 @@ async def main_async() -> int:
         return await cmd_db(args)
     elif args.command == "kg":
         return await cmd_kg(args)
+    elif args.command == "mind":
+        return await cmd_mind(args)
     elif args.command == "config":
         return await cmd_config(args)
     else:
