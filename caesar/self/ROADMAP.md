@@ -67,8 +67,59 @@
 - ❌ 9 сабагентов — у caesar subagent-тул падает (`InternalError`); Dream Cycle уже
   делает консолидацию, сабагенты не нужны.
 
+## Hermes-parity (что подтянуть от Hermes Agent — честный замер по коду 2026-07-24)
+- ✅ Self-improving (скиллы из опыта + авто-улучшение) — ЕСТЬ: `_maybe_auto_save_skill`
+  (orchestrator:1405), L4 record_success/failure, anti_patterns. Полировать, не строить.
+- ✅ Learning loop — ЕСТЬ: L2/L3/L4 + dream-cycle + anti_patterns.
+- ✅ Advanced memory (модель юзера между сессиями) — ЕСТЬ/строится: L2+KG+Mind Mirror
+  (T1-T5). НЕ gap.
+- ❌ **Browser automation — GAP.** web_fetch/http_request без JS/взаимодействия.
+- ❌ **Voice conversations — пол-GAP.** STT (faster-whisper) входящий ГОТОВ
+  (telegram_adapter:396-428); TTS (ответ голосом) — GAP (нет tts.py / send_voice).
+- ❌ More tools — gaps = browser + TTS.
+
+**H1. Browser automation** (Playwright, опц. extra `[browser]`). ✅ DONE (0.13.0)
+- `browser_fetch(url)` — рендер JS, visible text + title (drop-in upgrade web_fetch для SPA).
+- `browser_action(url, steps)` — многошаговое взаимодействие (navigate/click/fill/text/screenshot)
+  в одной сессии с сохранением состояния (для логинов/форм).
+- import-guard: playwright не установлен → понятная ошибка с инструкцией. Тяжёлый binary (~150MB) — опц.
+**H2. TTS + voice replies** (edge-tts, опц. extra `[voice]`):
+- `caesar/tools/tts.py` (edge-tts → ogg).
+- telegram_adapter: если юзер писал голосом (или `/voice`) → ответ TTS → `send_voice`.
+- завершает voice-loop (вход STT есть, выход TTS — добавляем). Быстрый win, видимо в TG.
+**H3. (polish) Self-improving:** auto-merge похожих скиллов, auto-prune low-success.
+
 ## Принципы развития
 1. Сначала простая рабочая версия, потом усложняем.
 2. Каждый модуль тестируется отдельно перед интеграцией.
 3. Roadmap обновляется после каждой закрытой темы.
 4. Никаких «хотим сделать X» без конкретного сценария использования.
+
+---
+
+## 🧠 Brainstorm / Future (vision, НЕ committed)
+
+### Федеральный «общий мозг» агентов (идея юзера, 2026-07-24)
+Когда много установок Caesar — у каждой свой опыт. Если агент научился чему-то
+(рецепт, анти-паттерн) — передать в общую базу, которую другие читают.
+
+**Insight:** делиться ПРОЦЕДУРНЫМ (L4-скиллы + anti_patterns), НЕ фактами.
+Факты (L2/L3) — приватны/чужие. L4 — универсален, и Caesar его уже учится
+накапливать (dream-cycle, success_count). Валюта = рецепты + выстраданные «не делай X».
+
+**Дизайн (caesar-native, переиспользует существующее):**
+- shared layer = L4 skills (YAML recipes + anti_patterns/pitfalls).
+- publish: `caesar skill publish <name>` — санирует (user-пути/секреты), тегирует
+  контекстом (ОС/distro/caesar-ver), заливает в community skill-repo (куратор+signing).
+- subscribe: `caesar skill search/install` — тянет рецепт; **первый запуск с approval**
+  (shared = advisory до одобрения).
+- reputation: reuse L4-телеметрии (success_count/consecutive_failures) → анонимная
+  success/fail-статистика по shared-скиллам → рейтинг.
+- trust: shared-скиллы через sandboxed skill_executor (is_dangerous always-on с 0.11.1,
+  anti_patterns enforced) + first-run gate → малварный скилл не `rm -rf /`.
+
+**Трудное:** trust/малварь (signing+куратор+approval), relevance (контекст-теги+рейтинг),
+privacy (санация перед publish), abuse (модерация репы).
+
+**MVP-путь (низкий риск):** `caesar skill publish/install` в публичный repo — шериинг
+YAML-рецептов БЕЗ telemetry/signing; репутацию/подписи прикрутить позже.

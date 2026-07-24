@@ -16,6 +16,7 @@ from caesar.tools.self_knowledge import get_self_knowledge_tools
 from caesar.tools.documents import get_documents_tools
 from caesar.tools.stt import get_audio_tools
 from caesar.tools.cron_tools import get_cron_tools
+from caesar.tools.browser import get_browser_tools
 
 
 class ToolRegistry:
@@ -71,6 +72,10 @@ class ToolRegistry:
         # Категория 9: Cron (планировщик задач)
         for tool in get_cron_tools():
             self._tools[tool.name] = tool
+
+        # Категория 10: Browser automation (Playwright, опц. — lazy import на execute)
+        for tool in get_browser_tools():
+            self._tools[tool.name] = tool
     
     def get(self, name: str) -> Tool | None:
         return self._tools.get(name)
@@ -102,6 +107,7 @@ class ToolRegistry:
         "github_releases", "github_search",
         "hn_search", "reddit_search", "wikipedia_read",
         "rss_read", "tg_read_channel",
+        "browser_fetch", "browser_action",
     }
     # Инструменты файлов — для file/code задач
     FILE_TOOLS = {

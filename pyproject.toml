@@ -53,6 +53,9 @@ remote = [
 l3 = [
     "sentence-transformers>=2.7",
 ]
+browser = [
+    "playwright>=1.40",
+]
 cron = [
     "APScheduler>=3.10",
 ]
