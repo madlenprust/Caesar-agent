@@ -119,12 +119,19 @@ class SmartWatchdog:
             conn.row_factory = sqlite3.Row
 
             now = datetime.now()
-            rows = conn.execute("""
+            # Boot-race-guard: колонка `paused` добавляется миграцией daemon-а
+            # (_init_db). Watchdog — ОТДЕЛЬНЫЙ процесс; если он чекает до миграции
+            # (fresh DB или daemon упал до _init_db), запрос упадёт «no such column:
+            # paused». Проверяем наличие колонки и собираем WHERE условно — тогда
+            # stuck-detection не сбоит на boot-race (а найдёт пусто на свежей БД).
+            cols = {r["name"] for r in conn.execute("PRAGMA table_info(tasks)").fetchall()}
+            paused_filter = "AND (paused IS NULL OR paused = 0)" if "paused" in cols else ""
+            rows = conn.execute(f"""
                 SELECT id, started_at, complexity, channel_id, user_id,
                        user_message, source_chat_id, source
                 FROM tasks
                 WHERE status = 'running'
-                  AND (paused IS NULL OR paused = 0)
+                {paused_filter}
             """).fetchall()
 
             for row in rows:

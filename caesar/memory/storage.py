@@ -504,6 +504,11 @@ class Storage:
         - Если нет → добавляем
         """
         with self._conn() as conn:
+            # M2 (audit): сериализовать read-modify-write (supersede). Без этого два
+            # писателя (юзер-ход + dream@2:00) могут оба прочитать «один активный
+            # факт» и создать дубль активного. BEGIN IMMEDIATE берёт write-lock
+            # СРАЗУ, до SELECT → второй писатель блокируется до commit'а первого.
+            conn.execute("BEGIN IMMEDIATE")
             # Ищем существующий активный факт
             row = conn.execute("""
                 SELECT * FROM l2_facts

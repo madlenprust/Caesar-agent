@@ -219,6 +219,21 @@ async def cmd_update(args) -> int:
             cwd=str(repo_dir),
             capture_output=True, timeout=30,
         )
+        # M1 (audit): слепой reset --hard губил локальные правки и .env. Прячем
+        # tracked-изменения в stash ПЕРЕД reset и восстанавливаем после (best-effort).
+        dirty = subprocess.run(
+            ["git", "status", "--porcelain"],
+            cwd=str(repo_dir), capture_output=True, text=True, timeout=5,
+        )
+        stashed = False
+        if dirty.returncode == 0 and dirty.stdout.strip():
+            stash = subprocess.run(
+                ["git", "stash", "push", "-m", "caesar-update autostash"],
+                cwd=str(repo_dir), capture_output=True, text=True, timeout=15,
+            )
+            if stash.returncode == 0 and "Saved" in (stash.stdout or ""):
+                stashed = True
+                print("📦 Локальные правки спрятаны в stash — восстановлю после обновления")
         result = subprocess.run(
             ["git", "reset", "--hard", f"origin/{branch}"],
             cwd=str(repo_dir),
@@ -229,6 +244,17 @@ async def cmd_update(args) -> int:
             return 1
         # НЕ печатаем commit здесь — он будет в "📋 Что нового" ниже.
         # Раньше печатали '✅ <commit>' → дублировалось с "📋 Что нового".
+        # Восстанавливаем спрятанные правки (если конфликт — оставляем в stash, не губим).
+        if stashed:
+            pop = subprocess.run(
+                ["git", "stash", "pop"],
+                cwd=str(repo_dir), capture_output=True, text=True, timeout=15,
+            )
+            if pop.returncode != 0:
+                print("⚠️ Не смог восстановить локальные правки (конфликт с новым кодом).")
+                print("   Они НЕ потеряны — в stash: `git stash list` / `git stash pop` вручную.")
+            else:
+                print("✅ Локальные правки восстановлены")
     except Exception as e:
         print(f"❌ Git error: {e}")
         return 1

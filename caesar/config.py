@@ -179,12 +179,10 @@ class QueueConfig:
 @dataclass
 class OrchestratorConfig:
     """Конфигурация оркестратора."""
-    reflection_mode: str = "adaptive"  # adaptive | always | never | on_error_only
-    reflection_interval_steps: int = 5
-    reflection_on_subtask_switch: bool = True
-    reflection_on_error: bool = True
-    reflection_allow_explicit_call: bool = True
-    
+    # NOTE (audit L1): был блок reflection_* (mode/interval_steps/on_subtask_switch/
+    # on_error/allow_explicit_call) — vaporware, нигде не читался. Убран; если
+    # рефлексия понадобится — добавлять вместе с реализацией (roadmap), а не как
+    # мёртвый конфиг, который вводит в заблуждение.
     max_steps_simple: int = 25
     max_steps_medium: int = 50
     max_steps_complex: int = 100
