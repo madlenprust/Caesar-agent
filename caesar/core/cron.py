@@ -364,28 +364,34 @@ class CronScheduler:
         """Список cron-задач пользователя."""
         return self.storage.list_cron_tasks(user_id, only_enabled)
     
-    def _is_quiet_hours(self) -> bool:
-        """Проверить сейчас ли тихие часы."""
+    @staticmethod
+    def _quiet_window_contains(now_t: "time", start_str: str, end_str: str) -> bool:
+        """Чистая логика: входит ли now_t в окно [start, end].
+
+        start<=end — обычное окно (08:00-17:00); start>end — через полночь
+        (23:00-08:00). Вынесено в pure-хелпер для детерминированного тестирования
+        (без мока datetime.now).
+        """
+        from datetime import time
         try:
-            from datetime import datetime, time
-            start_str = getattr(self.config.cron, "quiet_hours_start", "23:00")
-            end_str = getattr(self.config.cron, "quiet_hours_end", "08:00")
-            
             start_h, start_m = map(int, start_str.split(":"))
             end_h, end_m = map(int, end_str.split(":"))
-            
-            now = datetime.now().time()
             start = time(start_h, start_m)
             end = time(end_h, end_m)
-            
             if start <= end:
                 # Обычный случай: 08:00 - 17:00
-                return start <= now <= end
-            else:
-                # Переход через полночь: 23:00 - 08:00
-                return now >= start or now <= end
+                return start <= now_t <= end
+            # Переход через полночь: 23:00 - 08:00
+            return now_t >= start or now_t <= end
         except Exception:
             return False
+
+    def _is_quiet_hours(self) -> bool:
+        """Проверить сейчас ли тихие часы."""
+        from datetime import datetime
+        start_str = getattr(self.config.cron, "quiet_hours_start", "23:00")
+        end_str = getattr(self.config.cron, "quiet_hours_end", "08:00")
+        return CronScheduler._quiet_window_contains(datetime.now().time(), start_str, end_str)
 
     def _next_quiet_end_datetime(self) -> "datetime":
         """Ближайший момент окончания тихих часов (для deferred-переноса cron).
