@@ -1017,7 +1017,30 @@ class Orchestrator:
                         result_data = {"result": str(tool_result)}
                         result_error = None
                         result_success = True
-                    
+
+                    # (S1) Видимость самообучения: перехват self-модифицирующих
+                    # инструментов — сообщаем юзеру что агент что-то записал/выучил
+                    # (как Hermes показывает «я обучился» по ходу задачи).
+                    if result_success and not result_error:
+                        try:
+                            if tc.name == "memory_add_fact":
+                                _a = tc.arguments or {}
+                                _cat = _a.get("category", "fact")
+                                if _cat in ("decision", "win", "incident", "preference"):
+                                    await self.note_self_update(
+                                        f"запомнил [{_cat}]: "
+                                        f"{_a.get('entity','?')}.{_a.get('attribute','?')} "
+                                        f"= {_a.get('value','')}",
+                                        emit_key=task.source_chat_id or "",
+                                    )
+                            elif tc.name == "self_edit":
+                                await self.note_self_update(
+                                    "обновил self-knowledge (свой код/доки)",
+                                    emit_key=task.source_chat_id or "",
+                                )
+                        except Exception as _e:
+                            self.log.debug(f"self-update note failed: {_e}")
+
                     # Сохраняем в full_tool_history для auto-save skill extraction.
                     # Храним только recipe-worthy поля (без полного result — он
                     # может быть огромным). Для ошибок — сохраняем message.
@@ -1402,6 +1425,21 @@ class Orchestrator:
         "memory_search", "skill_find", "cron_list",
     }
     
+    async def note_self_update(self, text: str, emit_key: str = "") -> None:
+        """(S1) Видимость самообучения: компактное уведомление «🧠 ...» per self-update.
+
+        Как Hermes — юзер видит по ходу, что агент что-то записал/выучил
+        (запомнил факт, сохранил скилл, обновил self-knowledge). Роутится через
+        info_notification event → рендерится каналом (TG/CLI) без правок адаптеров.
+        """
+        self.log.info(f"self-update: {text}")
+        if self.event_bus and emit_key:
+            try:
+                from caesar.core.events import info_notification
+                await self.event_bus.emit(emit_key, info_notification(f"🧠 {text}"))
+            except Exception as e:
+                self.log.debug(f"self-update emit failed: {e}")
+
     async def _maybe_auto_save_skill(
         self, task: Task, used_tools: set, steps: int,
         full_tool_history: list[dict] | None = None,

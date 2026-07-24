@@ -121,19 +121,26 @@ class MemoryAddFactTool(Tool):
             "attribute": {"type": "string", "description": "Что именно (например: token_file, model)"},
             "value": {"type": "string", "description": "Значение"},
             "confidence": {"type": "string", "enum": ["high", "medium"], "default": "medium"},
+            "category": {
+                "type": "string",
+                "enum": ["fact", "decision", "win", "incident", "preference"],
+                "default": "fact",
+                "description": "Категория: decision (решение), win (успех), "
+                "incident (сбой), preference (указание юзера), fact (прочее).",
+            },
             "source_quote": {"type": "string", "description": "Цитата-источник (обязательно)"},
             "tags": {"type": "array", "items": {"type": "string"}},
         },
         "required": ["entity", "attribute", "value", "source_quote"],
     }
-    
+
     def __init__(self, storage, channel_id: str = "", user_id: str = "", author_id: str = ""):
         super().__init__()
         self.storage = storage
         self.default_channel = channel_id
         self.default_user = user_id
         self.default_author = author_id
-    
+
     async def execute(
         self,
         entity: str,
@@ -141,6 +148,7 @@ class MemoryAddFactTool(Tool):
         value: str,
         confidence: str = "medium",
         source_quote: str = "",
+        category: str = "fact",
         tags: list[str] | None = None,
         channel: str | None = None,
         user_id: str | None = None,
@@ -150,12 +158,12 @@ class MemoryAddFactTool(Tool):
         ch = channel or self.default_channel
         uid = user_id or self.default_user
         au = author_id or self.default_author or uid
-        
+
         if not ch or not uid:
             return ToolResult(success=False, error="No channel_id or user_id")
-        
+
         channel_name = ch.rsplit(":", 1)[-1] if ":" in ch else ch
-        
+
         result = self.storage.add_fact(
             user_id=uid,
             channel=channel_name,
@@ -163,6 +171,7 @@ class MemoryAddFactTool(Tool):
             attribute=attribute,
             value=value,
             confidence=confidence,
+            category=category,
             author_id=au,
             tags=tags,
         )
