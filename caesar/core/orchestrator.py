@@ -765,13 +765,19 @@ class Orchestrator:
         # Ограничиваем длину сообщения (защита от огромных вводов)
         user_msg = task.user_message[:50000] if len(task.user_message) > 50000 else task.user_message
         
-        system_prompt = self._build_system_prompt(task, memory_context, len(history_messages), l3_context)
-        
+        # (E2) Prompt prefix caching: split system prompt → stable (rules+tools,
+        # cacheable prefix) + variable (memory+L3+manual+task). DashScope
+        # implicit-cache находит stable-prefix → 80% скидка на токены.
+        stable_prompt, variable_prompt = self._build_system_prompt(
+            task, memory_context, len(history_messages), l3_context
+        )
+
         # Лимиты — используем complexity из cheap analyzer если есть
         effective_complexity = analysis.get("complexity") or task.complexity
-        
+
         messages: list[LLMMessage] = [
-            LLMMessage(role="system", content=system_prompt),
+            LLMMessage(role="system", content=stable_prompt),
+            LLMMessage(role="system", content=variable_prompt),
         ]
         
         # Добавляем историю диалога — адаптивный лимит
@@ -1326,9 +1332,14 @@ class Orchestrator:
         memory_context: str = "",
         history_count: int = 0,
         l3_context: str = "",
-    ) -> str:
-        """Системный промпт для умной LLM."""
-        prompt = f"""Ты — Caesar, AI-агент на Ubuntu. Помогай пользователю. Инструменты используй когда нужно.
+    ) -> tuple[str, str]:
+        """Системный промпт. Возвращает (stable, variable) — два message для prefix-caching (E2).
+
+        Stable: правила + описания инструментов (100% static → cacheable prefix).
+        DashScope implicit-cache находит stable-prefix → 80% скидка на токены.
+        Variable: original_directive + history + manual overlay + memory + L3 (per-task).
+        """
+        stable = f"""Ты — Caesar, AI-агент на Ubuntu. Помогай пользователю. Инструменты используй когда нужно.
 
 ПРАВИЛА:
 - Действуй САМ, автономно. НЕ ПРОСИ РАЗРЕШЕНИЯ на обратимые/восстановительные
@@ -1345,7 +1356,7 @@ class Orchestrator:
 - "запомни X" → вызови memory_add_fact. "удали X" → memory_delete.
 - web_search пустой → github_releases, hn_search, reddit_search, wikipedia_read.
 - "выполни команду X" → shell_exec. Не отказывайся до попытки.
-- После 3 неудач — честно сообщи об ошибке с stderr.
+- После 3 неудач — честно сообщить об ошибке с stderr.
 
 ИНСТРУМЕНТЫ:
 - shell_exec — команды терминала
@@ -1357,28 +1368,27 @@ class Orchestrator:
 - skill_find — найти скилл
 - cron_add / cron_list / cron_remove — планировщик
 """
+        variable = ""
         # ИЗНАЧАЛЬНАЯ ЗАДАЧА — чтобы LLM могла self-check перед вопросами
         if task.original_directive and task.original_directive != task.user_message:
-            prompt += (
+            variable += (
                 f"\nИЗНАЧАЛЬНАЯ ЗАДАЧА ПОЛЬЗОВАТЕЛЯ (исходная постановка):\n"
                 f"{task.original_directive[:1000]}\n"
                 f"\nЭто полная изначальная задача. Если у тебя возникает вопрос — "
                 f"сначала проверь можно ли ответить из этого текста.\n"
             )
-        
+
         if history_count > 0:
-            prompt += f"\nВ истории диалога {history_count} предыдущих сообщений. Учитывай их при ответе.\n"
+            variable += f"\nВ истории диалога {history_count} предыдущих сообщений. Учитывай их при ответе.\n"
 
         # (T2) User-curated knowledge (manual/ overlay) — high-priority, авторитетно.
-        # Юзер пишет в ~/caesar/mind/manual/*.md то, что агент должен всегда знать
-        # (приоритет над извлечёнными L2-фактами). Аналог AGENTS.md, но для памяти.
         try:
             if not hasattr(self, "_mind_mirror") or self._mind_mirror is None:
                 from caesar.memory.mind_mirror import MindMirror
                 self._mind_mirror = MindMirror(self.storage, kg=getattr(self, "kg", None))
             manual = self._mind_mirror.load_manual_context()
             if manual:
-                prompt += (
+                variable += (
                     "\n📋 ЗНАНИЯ ОТ ПОЛЬЗОВАТЕЛЯ (curated, авторитетно — "
                     "приоритет над извлечёнными фактами):\n"
                     f"{manual}\n"
@@ -1387,11 +1397,11 @@ class Orchestrator:
             self.log.warning(f"Failed to load manual mind overlay: {e}")
 
         if memory_context:
-            prompt += f"\n{memory_context}\n"
-        
+            variable += f"\n{memory_context}\n"
+
         if l3_context:
-            prompt += f"\n{l3_context}\n"
-            prompt += (
+            variable += f"\n{l3_context}\n"
+            variable += (
                 "\nКАК ОТВЕЧАТЬ (ВАЖНО):\n"
                 "- Отвечай НА ВОПРОС пользователя прямо, как обычный собеседник.\n"
                 "- Используй материалы выше как СВОИ ЗНАНИЯ — не говори 'я нашёл', 'в документе сказано', 'согласно источнику'.\n"
@@ -1400,8 +1410,8 @@ class Orchestrator:
                 "- Плохо: 'Я нашёл документ. В нём говорится, что агрессия — это...'\n"
                 "- Хорошо: 'Агрессия — это форма поведения, направленная на причинение вреда...'\n"
             )
-        
-        return prompt
+
+        return stable, variable
     
     # Инструменты, чьи вызовы имеют смысл сохранять в exact_recipe.
     # Это детерминированные действия (shell, file writes, code edits) —

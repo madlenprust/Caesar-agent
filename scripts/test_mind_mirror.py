@@ -134,16 +134,43 @@ def test_orchestrator_injects_manual_overlay():
     mirror.manual.mkdir(parents=True, exist_ok=True)
     (mirror.manual / "always.md").write_text("Юзера зовут Alex", encoding="utf-8")
     stub = SimpleNamespace(storage=s, kg=None, log=MagicMock(), _mind_mirror=None)
-    prompt = Orchestrator._build_system_prompt(
+    stable, variable = Orchestrator._build_system_prompt(
         stub, Task(), memory_context="", history_count=0, l3_context="")
-    assert "ЗНАНИЯ ОТ ПОЛЬЗОВАТЕЛЯ" in prompt
-    assert "Alex" in prompt
+    assert "ЗНАНИЯ ОТ ПОЛЬЗОВАТЕЛЯ" in variable
+    assert "Alex" in variable
+    assert "ЗНАНИЯ ОТ ПОЛЬЗОВАТЕЛЯ" not in stable  # stable = rules only
 
 
 def test_orchestrator_no_manual_no_block():
-    """Без manual/ — блока curated-знаний нет (prompt без 'ЗНАНИЯ ОТ ПОЛЬЗОВАТЕЛЯ')."""
+    """Без manual/ — блока curated-знаний нет."""
     s, _ = _storage_with_data()
     stub = SimpleNamespace(storage=s, kg=None, log=MagicMock(), _mind_mirror=None)
-    prompt = Orchestrator._build_system_prompt(
+    stable, variable = Orchestrator._build_system_prompt(
         stub, Task(), memory_context="", history_count=0, l3_context="")
-    assert "ЗНАНИЯ ОТ ПОЛЬЗОВАТЕЛЯ" not in prompt
+    assert "ЗНАНИЯ ОТ ПОЛЬЗОВАТЕЛЯ" not in stable
+    assert "ЗНАНИЯ ОТ ПОЛЬЗОВАТЕЛЯ" not in variable
+
+
+def test_prompt_split_stable_has_rules_variable_has_memory():
+    """E2: _build_system_prompt → (stable, variable). Stable = rules (cacheable),
+    variable = memory+L3+history (per-task). Split enables DashScope prefix-caching."""
+    s, _ = _storage_with_data()
+    stub = SimpleNamespace(storage=s, kg=None, log=MagicMock(), _mind_mirror=None)
+    stable, variable = Orchestrator._build_system_prompt(
+        stub, Task(),
+        memory_context="L2 facts here",
+        history_count=5,
+        l3_context="L3 chunks here",
+    )
+    # Stable — правила (static, cacheable prefix)
+    assert "Ты — Caesar" in stable
+    assert "ПРАВИЛА" in stable
+    assert "ИНСТРУМЕНТЫ" in stable
+    # Stable НЕ содержит variable-данные
+    assert "L2 facts" not in stable
+    assert "L3 chunks" not in stable
+    assert "5 предыдущих" not in stable
+    # Variable — per-task данные
+    assert "L2 facts here" in variable
+    assert "L3 chunks here" in variable
+    assert "5 предыдущих" in variable

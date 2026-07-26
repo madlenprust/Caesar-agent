@@ -90,6 +90,23 @@
 - завершает voice-loop (вход STT есть, выход TTS — добавляем).
 **H3. (polish) Self-improving:** auto-merge похожих скиллов, auto-prune low-success.
 
+### Token Economy (вдохновлено статьёй Writer «AI harness», 2026-07-26)
+Writer: orchestration-слой → -38% токенов, -41% cost, -44% time, success не упал.
+**E1. Cheap-LLM предобработка результатов поиска.** web_search/github_releases/
+hn_search → raw результаты (3000-5000 tok) флудят smart LLM контекст. Идея: cheap
+LLM экстрактит релевантное → smart получает 500 tok вместо 5000. Gate by размер
+(>2000 tok → pre-process; иначе напрямую). Tradeoff: +1 cheap-LLM вызов (~$0.001)
+vs -4500 smart-LLM токенов (smart в 5-10x дороже) → net win.
+**E2. Prompt-prefix кэширование.** ✅ DONE (0.14.1)
+Подтверждено: DashScope поддерживает prefix-caching (implicit auto, 20% hit cost) для
+qwen3.7-max + glm-5.2. Fix: _build_system_prompt → tuple (stable, variable). Stable
+(rules+tools, ~8000 tok, 100% static) — первый system message → cacheable prefix.
+Variable (memory+L3+manual+task) — второй. Caller: два system messages вместо одного.
+DashScope implicit-cache находит stable-prefix → 80% скидка. + ReAct history prefix
+(шаги 1-N) — auto-cached. Оценка: -64% токенов на 10-шаговом ReAct.
+Pre-condition: ✅ dashscope implicit caching подтверждён для qwen3.7-max + glm-5.2.
+TODO: explicit cache_control markers (10% hit cost vs 20% implicit) — follow-up.
+
 ## Принципы развития
 1. Сначала простая рабочая версия, потом усложняем.
 2. Каждый модуль тестируется отдельно перед интеграцией.
