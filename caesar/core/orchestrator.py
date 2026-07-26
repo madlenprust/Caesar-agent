@@ -1073,23 +1073,50 @@ class Orchestrator:
                             success=result_success,
                         )
                     
-                    # Добавляем результат в сообщения
-                    # Обрезаем значения ВНУТРИ result_data до 500 символов ДО json.dumps
-                    # чтобы JSON оставался валидным
-                    truncated_data = {}
-                    for k, v in (result_data or {}).items():
-                        if isinstance(v, str) and len(v) > 500:
-                            truncated_data[k] = v[:500] + "... (truncated)"
-                        elif isinstance(v, list) and len(str(v)) > 1000:
-                            truncated_data[k] = str(v)[:1000] + "... (truncated)"
-                        else:
-                            truncated_data[k] = v
-                    result_str = json.dumps(
-                        truncated_data if truncated_data else {"error": result_error or "unknown error"},
-                        ensure_ascii=False,
-                        default=str,
-                    )[:3000]
-                    
+                    # Добавляем результат в сообщения.
+                    # (E1) Token economy: для search/fetch инструментов с большими
+                    # результатами — cheap LLM экстрактит релевантное вместо
+                    # brute-truncation (статья Writer: subagent → concise summary, -38% токенов).
+                    result_str = None
+                    if tc.name in self.SEARCH_FETCH_TOOLS and result_success:
+                        raw = json.dumps(result_data or {}, ensure_ascii=False, default=str)
+                        if len(raw) > 2000:  # gate: только большие результаты
+                            try:
+                                extract_resp = await self.llm.cheap_chat(
+                                    [LLMMessage(role="user", content=(
+                                        f"Результаты инструмента {tc.name} (raw):\n{raw[:8000]}\n\n"
+                                        f"Запрос пользователя: «{task.user_message[:200]}»\n"
+                                        f"Извлеки ТОЛЬКО информацию релевантную для ответа. Будь краток."
+                                    ))],
+                                    temperature=0.1, max_tokens=500,
+                                )
+                                if (extract_resp.content or "").strip():
+                                    result_str = json.dumps(
+                                        {"extracted": extract_resp.content.strip()},
+                                        ensure_ascii=False,
+                                    )[:3000]
+                                    self.log.info(
+                                        f"E1: {tc.name} result {len(raw)}→{len(result_str)} chars "
+                                        f"(cheap-LLM extraction)"
+                                    )
+                            except Exception as e:
+                                self.log.debug(f"E1 extraction failed, fallback to truncation: {e}")
+
+                    if result_str is None:
+                        # Brute truncation (fallback): обрезаем значения до 500 символов
+                        truncated_data = {}
+                        for k, v in (result_data or {}).items():
+                            if isinstance(v, str) and len(v) > 500:
+                                truncated_data[k] = v[:500] + "... (truncated)"
+                            elif isinstance(v, list) and len(str(v)) > 1000:
+                                truncated_data[k] = str(v)[:1000] + "... (truncated)"
+                            else:
+                                truncated_data[k] = v
+                        result_str = json.dumps(
+                            truncated_data if truncated_data else {"error": result_error or "unknown error"},
+                            ensure_ascii=False, default=str,
+                        )[:3000]
+
                     messages.append(LLMMessage(
                         role="tool",
                         content=result_str,
@@ -1421,7 +1448,18 @@ class Orchestrator:
         "self_edit", "self_install_package",
         "cron_add",
     }
-    
+
+    # (E1) Инструменты поиска/феча — результаты могут быть большими.
+    # Если результат >2000 chars → cheap LLM экстрактит релевантное
+    # вместо brute-truncation (статья Writer: -38% токенов).
+    SEARCH_FETCH_TOOLS = {
+        "web_search", "web_fetch", "http_request",
+        "browser_fetch", "browser_action",
+        "github_releases", "github_search",
+        "hn_search", "reddit_search", "wikipedia_read",
+        "rss_read", "tg_read_channel",
+    }
+
     # Инструменты, которые НЕ имеют смысла сохранять (read-only или
     # non-deterministic). Если скилл состоит ТОЛЬКО из таких — не сохраняем.
     READ_ONLY_TOOLS = {

@@ -92,11 +92,14 @@
 
 ### Token Economy (вдохновлено статьёй Writer «AI harness», 2026-07-26)
 Writer: orchestration-слой → -38% токенов, -41% cost, -44% time, success не упал.
-**E1. Cheap-LLM предобработка результатов поиска.** web_search/github_releases/
-hn_search → raw результаты (3000-5000 tok) флудят smart LLM контекст. Идея: cheap
-LLM экстрактит релевантное → smart получает 500 tok вместо 5000. Gate by размер
-(>2000 tok → pre-process; иначе напрямую). Tradeoff: +1 cheap-LLM вызов (~$0.001)
-vs -4500 smart-LLM токенов (smart в 5-10x дороже) → net win.
+**E1. Cheap-LLM предобработка результатов поиска.** ✅ DONE (0.15.0)
+SEARCH_FETCH_TOOLS (web_search/web_fetch/http_request/browser_fetch/browser_action/
+github_releases/hn_search/reddit_search/wikipedia_read/rss_read/tg_read_channel):
+если результат >2000 chars → cheap LLM экстрактит релевантное (concise summary)
+вместо brute-truncation (первые 500 символов могут пропустить релевантное).
+Gate: только большие результаты (>2000 chars) → +1 cheap-LLM вызов (~$0.001)
+vs -3000+ smart-LLM токенов. Fallback на brute-truncation если cheap-LLM недоступен.
+Статья Writer валидировала: -38% токенов через subagent → concise summary.
 **E2. Prompt-prefix кэширование.** ✅ DONE (0.14.1)
 Подтверждено: DashScope поддерживает prefix-caching (implicit auto, 20% hit cost) для
 qwen3.7-max + glm-5.2. Fix: _build_system_prompt → tuple (stable, variable). Stable
