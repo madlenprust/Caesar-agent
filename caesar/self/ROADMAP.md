@@ -83,10 +83,11 @@
 - `browser_action(url, steps)` — многошаговое взаимодействие (navigate/click/fill/text/screenshot)
   в одной сессии с сохранением состояния (для логинов/форм).
 - import-guard: playwright не установлен → понятная ошибка с инструкцией. Тяжёлый binary (~150MB) — опц.
-**H2. TTS + voice replies** (edge-tts, опц. extra `[voice]`):
-- `caesar/tools/tts.py` (edge-tts → ogg).
-- telegram_adapter: если юзер писал голосом (или `/voice`) → ответ TTS → `send_voice`.
-- завершает voice-loop (вход STT есть, выход TTS — добавляем). Быстрый win, видимо в TG.
+**H2. TTS + voice replies** (edge-tts, опц. extra `[voice]`). ✅ DONE (0.14.0)
+- `caesar/tools/tts.py` (edge-tts → mp3 → ffmpeg → ogg/Opus; fallback mp3/sendAudio).
+- telegram_adapter: юзер написал голосом → `session.voice_reply=True` → ответ TTS → `send_voice`.
+  one-shot (сбрасывается после ответа). Fallback на текст если TTS недоступен.
+- завершает voice-loop (вход STT есть, выход TTS — добавляем).
 **H3. (polish) Self-improving:** auto-merge похожих скиллов, auto-prune low-success.
 
 ## Принципы развития

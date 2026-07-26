@@ -46,6 +46,7 @@ telegram = [
 ]
 voice = [
     "faster-whisper>=1.0",
+    "edge-tts>=6.1",
 ]
 remote = [
     "paramiko>=3.0",  # password-SSH для remote_exec (агент просит пароль у пользователя)

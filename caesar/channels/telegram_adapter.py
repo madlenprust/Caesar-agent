@@ -60,6 +60,10 @@ class TgSession:
         # последний момент активности в чате — для TTL-чистки неактивных сессий
         self.last_activity: float = time.time()
         self.last_progress_text: str = ""
+        # (H2) Voice-out: если True → следующий ответ голосом (TTS).
+        # Ставится при voice-in (юзер написал голосом → ответ тоже голосом),
+        # сбрасывается после отправки ответа (one-shot).
+        self.voice_reply: bool = False
         self.last_answer_message_id: int | None = None
         # GOD MODE — снимает ВСЕ блокировки. Активируется секретным словом.
         # В god mode бот может выполнить ЛЮБУЮ команду: rm -rf /, sudo, reboot, и т.д.
@@ -429,6 +433,8 @@ class TelegramAdapter:
             # НЕ показываем распознанный текст пользователю — неестественно.
             # Текст сразу идёт агенту как обычное сообщение, ответ приходит как обычно.
             # Лог с распознанным текстом доступен в journalctl.
+            # (H2) Voice-out: юзер написал голосом → ответ тоже голосом (TTS).
+            session.voice_reply = True
         
         # Document (.txt, .md, .pdf, .docx) → обработка
         document = message.get("document")
@@ -1581,7 +1587,25 @@ class TelegramAdapter:
                 session.icons_sequence = []
             
             # Отправляем ответ
-            msg = await self._send_message(session.chat_id, content)
+            # (H2) Voice-out: если юзер писал голосом → TTS ответ → send_voice.
+            # one-shot: сбрасываем после отправки. TTS недоступен → fallback на текст.
+            if getattr(session, "voice_reply", False):
+                session.voice_reply = False
+                try:
+                    from caesar.tools.tts import synthesize as tts_synth
+                    tts_result = await tts_synth(content)
+                    if tts_result:
+                        audio_path, ct = tts_result
+                        msg = await self._send_voice(session.chat_id, audio_path, ct)
+                    else:
+                        msg = None
+                except Exception as e:
+                    self.log.warning(f"Voice-out failed, fallback to text: {e}")
+                    msg = None
+                if not msg:
+                    msg = await self._send_message(session.chat_id, content)
+            else:
+                msg = await self._send_message(session.chat_id, content)
             if msg:
                 session.last_answer_message_id = msg.get("message_id")
         
@@ -1623,6 +1647,27 @@ class TelegramAdapter:
                 session.progress_message_id = None
             await self._send_message(session.chat_id, f"❌ Ошибка: {message}")
     
+    async def _send_voice(self, chat_id: int, audio_path,
+                          content_type: str = "audio/ogg") -> dict | None:
+        """Отправить voice/audio через TG sendVoice (ogg, round bubble) или sendAudio (mp3)."""
+        try:
+            with open(audio_path, "rb") as f:
+                file_bytes = f.read()
+            if content_type == "audio/ogg":
+                method, field = "sendVoice", "voice"
+            else:
+                method, field = "sendAudio", "audio"
+            return await self._api_call(method, {
+                "chat_id": str(chat_id),
+            }, files={
+                field: (audio_path.name, file_bytes, content_type),
+            })
+        except Exception as e:
+            self.log.error(f"_send_voice failed: {e}")
+            return None
+        finally:
+            audio_path.unlink(missing_ok=True)
+
     async def _send_message(
         self,
         chat_id: int,
