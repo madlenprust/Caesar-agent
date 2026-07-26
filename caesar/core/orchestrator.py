@@ -406,6 +406,26 @@ class Orchestrator:
         # 3. LLM не может сюда попасть — это отдельный путь до LLM
         # 4. is_dangerous_command (rm -rf /, mkfs, dd) ВСЁ ЕЩЁ блокируется
         #    внутри ShellExecTool.execute()
+
+        # (T4) Natural-language mind query/forget — 0 токенов, до LLM.
+        # Юзер говорит «что ты знаешь про X?» / «забудь X» — оркестратор
+        # детектит и отвечает напрямую из БД. Без слэш-команд, разговорно.
+        mind = self._detect_mind_query(task.user_message)
+        if mind:
+            action, entity = mind
+            try:
+                if not hasattr(self, "_mind_mirror") or self._mind_mirror is None:
+                    from caesar.memory.mind_mirror import MindMirror
+                    self._mind_mirror = MindMirror(self.storage, kg=getattr(self, "kg", None))
+                if action == "query":
+                    return self._mind_mirror.query(entity, user_id=task.user_id or "")
+                elif action == "forget":
+                    count = self._mind_mirror.forget(entity)
+                    return (f"🗑 Забыто {count} факт(ов) про «{entity}».\n"
+                            f"{'Больше не буду это использовать.' if count else 'Нет активных фактов.'}")
+            except Exception as e:
+                self.log.warning(f"Mind query/forget failed: {e}")
+
         direct_cmd = self._detect_direct_command(task.user_message, task.user_id)
         if direct_cmd:
             # ОСОБЫЙ СЛУЧАЙ: рестарт caesar-daemon.
@@ -1814,6 +1834,41 @@ class Orchestrator:
         
         return "\n".join(gaps) if gaps else ""
     
+    @staticmethod
+    def _detect_mind_query(user_message: str) -> tuple[str, str] | None:
+        """Natural-language детектор «что ты знаешь про X?» / «забудь X».
+
+        Возвращает (action, entity) или None. Обрабатывается ДО LLM (0 токенов).
+        Слэш-команды /mind /forget в TG остаются как альтернатива для power-users.
+        """
+        msg = user_message.strip()
+        msg_lower = msg.lower()
+        # Query: «что ты знаешь про X» / «что помнишь про X» / «что знаешь о X»
+        query_triggers = [
+            "что ты знаешь про", "что знаешь про", "что помнишь про",
+            "что ты помнишь про", "что ты знаешь о", "что знаешь о",
+            "что помнишь о", "что ты помнишь о",
+        ]
+        for trigger in query_triggers:
+            if msg_lower.startswith(trigger):
+                entity = msg[len(trigger):].strip().rstrip("?.!")
+                if entity:
+                    return ("query", entity)
+        # Forget: «забудь ... про X» / «забудь X» / «забудь всё что знаешь про X»
+        if msg_lower.startswith("забудь"):
+            rest = msg[6:].strip()  # after "забудь"
+            # Find "про X" or "о X" anywhere → extract entity
+            m = re.search(r"\b(?:про|о)\b\s+(.+)", rest, re.IGNORECASE)
+            if m:
+                entity = m.group(1).strip().rstrip("?.!")
+                if entity:
+                    return ("forget", entity)
+            # «забудь X» (без предлога) — но не «забудь всё» (без сущности)
+            entity = rest.strip().rstrip("?.!")
+            if entity and not entity.lower().startswith(("всё", "все")):
+                return ("forget", entity)
+        return None
+
     def _detect_direct_command(self, user_message: str, user_id: str = "") -> str | None:
         """Детектор прямых команд — когда пользователь явно просит
         выполнить shell команду.

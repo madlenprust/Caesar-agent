@@ -103,3 +103,46 @@ def test_forget_idempotent():
     mirror = MindMirror(s)
     assert mirror.forget("Postgres") == 2
     assert mirror.forget("Postgres") == 0  # уже забыты
+
+
+# --- natural-language detection (_detect_mind_query) ---
+
+from caesar.core.orchestrator import Orchestrator
+
+
+def test_detect_query_phrasings():
+    """Natural-language «что ты знаешь про X?» → ('query', X)."""
+    cases = [
+        ("что ты знаешь про Postgres?", "Postgres"),
+        ("что знаешь про API", "API"),
+        ("что помнишь про Postgres", "Postgres"),
+        ("что ты помнишь о Postgres", "Postgres"),
+        ("Что ты знаешь про React?", "React"),
+    ]
+    for msg, entity in cases:
+        result = Orchestrator._detect_mind_query(msg)
+        assert result is not None, f"should detect: {msg}"
+        assert result[0] == "query"
+        assert result[1] == entity, f"entity={result[1]} expected={entity}"
+
+
+def test_detect_forget_phrasings():
+    """Natural-language «забудь X» / «забудь всё про X» → ('forget', X)."""
+    cases = [
+        ("забудь Postgres", "Postgres"),
+        ("забудь всё про Postgres", "Postgres"),
+        ("забудь про API", "API"),
+        ("Забудь всё что знаешь про React", "React"),  # wait — this uses "про" detection
+    ]
+    for msg, entity in cases:
+        result = Orchestrator._detect_mind_query(msg)
+        assert result is not None, f"should detect: {msg}"
+        assert result[0] == "forget", f"action={result[0]} for: {msg}"
+        assert result[1] == entity, f"entity={result[1]} expected={entity} for: {msg}"
+
+
+def test_detect_not_mind_query():
+    """Не-mind-запросы → None."""
+    for msg in ["расскажи про Postgres", "как дела", "найди новости",
+                 "запомни что X = Y", "выполни ls", "обновись"]:
+        assert Orchestrator._detect_mind_query(msg) is None, f"should NOT detect: {msg}"
