@@ -2862,24 +2862,52 @@ async def cmd_config(args) -> int:
 
 
 async def cmd_mind(args) -> int:
-    """Mind Mirror — Markdown-проекция памяти (T2)."""
+    """Mind Mirror — проекция памяти + inspect + forget (T2/T4)."""
     from caesar.memory.storage import Storage
     from caesar.memory.mind_mirror import MindMirror
 
     action = getattr(args, "mind_action", None)
-    if action != "export":
-        print("usage: caesar mind export")
-        return 1
-
     storage = Storage()
     mirror = MindMirror(storage)
-    counts = mirror.export()
-    print(f"🧠 Mind Mirror экспортирован → {mirror.auto}")
-    print(f"   фактов: {counts['facts']}, сущностей: {counts['entities']}, "
-          f"связей: {counts['relations']}")
-    print(f"   auto/ — read-only проекция (регенерируется dream-циклом и `caesar mind export`)")
-    print(f"   {mirror.manual}/ — пиши туда curated-факты (агент читает как high-priority)")
-    return 0
+
+    if action == "export":
+        counts = mirror.export()
+        print(f"🧠 Mind Mirror экспортирован → {mirror.auto}")
+        print(f"   фактов: {counts['facts']}, сущностей: {counts['entities']}, "
+              f"связей: {counts['relations']}")
+        print(f"   auto/ — read-only проекция (регенерируется dream-циклом и `caesar mind export`)")
+        print(f"   {mirror.manual}/ — пиши туда curated-факты (агент читает как high-priority)")
+        return 0
+
+    if action == "query":
+        entity = getattr(args, "entity", "")
+        if not entity:
+            print("usage: caesar mind query <entity>")
+            return 1
+        result = mirror.query(entity)
+        print(result)
+        return 0
+
+    if action == "forget":
+        entity = getattr(args, "entity", "")
+        if not entity:
+            print("usage: caesar mind forget <entity>")
+            return 1
+        # support "entity.attribute" syntax
+        parts = entity.split(".", 1)
+        ent = parts[0]
+        attr = parts[1] if len(parts) > 1 else ""
+        count = mirror.forget(ent, attr)
+        if count > 0:
+            print(f"🗑 Забыто {count} факт(ов) про «{ent}»"
+                  f"{f'.{attr}' if attr else ''}.")
+        else:
+            print(f"ℹ️ Нет активных фактов про «{ent}»"
+                  f"{f'.{attr}' if attr else ''}.")
+        return 0
+
+    print("usage: caesar mind export|query <entity>|forget <entity>")
+    return 1
 
 
 async def cmd_kg(args) -> int:
@@ -3109,6 +3137,10 @@ async def main_async() -> int:
     p_mind = subparsers.add_parser("mind", help="Mind Mirror — проекция памяти в Markdown")
     p_mind_sub = p_mind.add_subparsers(dest="mind_action", required=True)
     p_mind_sub.add_parser("export", help="Сгенерировать auto/ проекцию из L2+KG")
+    p_mind_query = p_mind_sub.add_parser("query", help="Что агент знает про сущность")
+    p_mind_query.add_argument("entity", help="Имя сущности (напр. Postgres)")
+    p_mind_forget = p_mind_sub.add_parser("forget", help="Забыть факты про сущность")
+    p_mind_forget.add_argument("entity", help="Имя сущности")
 
     # provider — управление LLM провайдерами (multi-provider)
     p_provider = subparsers.add_parser("provider", help="Управление LLM провайдерами")

@@ -190,3 +190,88 @@ class MindMirror:
                 chunks.append(block[: remain - len(suffix)] + suffix)
             break
         return "\n\n".join(chunks)
+
+    # --- query + forget (T4: inspectability + correction) ---
+
+    def query(self, entity: str, user_id: str = "") -> str:
+        """Запросить всё что агент знает про сущность → форматированный текст.
+
+        L2 active facts + KG relations (from/to). Для CLI `caesar mind query X`
+        и TG `/mind X`. Без LLM — прямой DB-запрос (мгновенно, 0 токенов).
+        """
+        with self.storage._conn() as conn:
+            if user_id:
+                facts = conn.execute(
+                    """SELECT user_id, attribute, value, category, confidence
+                       FROM l2_facts WHERE entity = ? AND user_id = ?
+                         AND valid_until IS NULL ORDER BY seq DESC""",
+                    (entity, user_id),
+                ).fetchall()
+            else:
+                facts = conn.execute(
+                    """SELECT user_id, attribute, value, category, confidence
+                       FROM l2_facts WHERE entity = ? AND valid_until IS NULL
+                       ORDER BY seq DESC""",
+                    (entity,),
+                ).fetchall()
+            rels = []
+            if self._has_table(conn, "kg_relations"):
+                if user_id:
+                    rels = conn.execute(
+                        """SELECT from_entity, to_entity, relation_type
+                           FROM kg_relations
+                           WHERE (from_entity = ? OR to_entity = ?) AND user_id = ?""",
+                        (entity, entity, user_id),
+                    ).fetchall()
+                else:
+                    rels = conn.execute(
+                        """SELECT from_entity, to_entity, relation_type
+                           FROM kg_relations WHERE from_entity = ? OR to_entity = ?""",
+                        (entity, entity),
+                    ).fetchall()
+
+        if not facts and not rels:
+            return f"Ничего не знаю про «{entity}»."
+
+        lines = [f"🧠 Что я знаю про «{entity}»:"]
+        if facts:
+            lines.append("\nФакты:")
+            for r in facts:
+                d = dict(r)
+                cat = d.get("category", "fact")
+                lines.append(
+                    f"  • [{cat}] {d['attribute']}: {d['value']}"
+                    f"  (user={d['user_id']}, conf={d.get('confidence','?')})"
+                )
+        if rels:
+            lines.append("\nСвязи:")
+            for r in rels:
+                d = dict(r)
+                if d["from_entity"] == entity:
+                    lines.append(f"  → {d['relation_type']} → {d['to_entity']}")
+                else:
+                    lines.append(f"  ← {d['relation_type']} ← {d['from_entity']}")
+        return "\n".join(lines)
+
+    def forget(self, entity: str, attribute: str = "") -> int:
+        """Пометить L2 facts как superseded (valid_until = now).
+
+        `/forget X` — все факты про X. `/forget X.attr` — конкретный атрибут.
+        Возвращает количество забытых фактов.
+        """
+        with self.storage._conn() as conn:
+            conn.execute("BEGIN IMMEDIATE")
+            if attribute:
+                cur = conn.execute(
+                    """UPDATE l2_facts SET valid_until = CURRENT_TIMESTAMP
+                       WHERE entity = ? AND attribute = ? AND valid_until IS NULL""",
+                    (entity, attribute),
+                )
+            else:
+                cur = conn.execute(
+                    """UPDATE l2_facts SET valid_until = CURRENT_TIMESTAMP
+                       WHERE entity = ? AND valid_until IS NULL""",
+                    (entity,),
+                )
+            conn.commit()
+            return cur.rowcount

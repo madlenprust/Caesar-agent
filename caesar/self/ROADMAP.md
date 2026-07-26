@@ -46,10 +46,11 @@
   компактный manifest: что подтянуто + ~токенов. Footer в CLI/TG
   («context: 3 L2, 5 L3, 2 KG, ~1.8K tok»). Transparency как у obsidian-mind meter.
 
-**T4. `caesar mind` + TG-команда «что ты знаешь про X».**
-- TG-first inspectability (obsidian-mind — CLI/Obsidian only): вернуть факты+relations
-  сущности из зеркала/БД. Глубокий бровз — `~/caesar/mind/auto/`, быстрый — TG/CLI.
-- `/forget X` / `/correct X` → помечают L2-fact superseded (`valid_until=now`).
+**T4. `caesar mind` + TG-команда «что ты знаешь про X».** ✅ DONE (0.16.0)
+- MindMirror.query(entity) → L2 active facts + KG relations (filtered by user_id).
+- CLI: `caesar mind query <entity>` / `caesar mind forget <entity[.attribute]>`.
+- TG: `/mind X` — inspect (instant, 0 tokens, no LLM). `/forget X` — supersede L2 facts.
+- `caesar mind export` — full Markdown projection (T2).
 
 **T5. Focus / North Star.**
 - `manual/focus.md` — текущая цель юзера («на этой неделе делаю X»), авто-инжектится

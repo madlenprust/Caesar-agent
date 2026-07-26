@@ -647,6 +647,14 @@ class TelegramAdapter:
                 await self._handle_pause_task(chat_id, pause=False)
             elif text in ("/settings", "/настройки"):
                 await self._handle_settings(chat_id)
+            elif text.startswith("/mind ") or text == "/mind":
+                # (T4) Что агент знает про сущность — inspectability
+                entity = text[6:].strip() if len(text) > 5 else ""
+                await self._handle_mind_query(chat_id, entity)
+            elif text.startswith("/forget ") or text == "/forget":
+                # (T4) Забыть факты про сущность — correction
+                entity = text[9:].strip() if len(text) > 8 else ""
+                await self._handle_mind_forget(chat_id, entity)
             return
         
         self.log.info(f"TG message from {user_tg_id} in chat {chat_id}: {text[:50]}...")
@@ -1855,6 +1863,8 @@ class TelegramAdapter:
             "  <b>/clear</b> — очистить контекст диалога (начать заново)\n"
             "  <b>/stop</b> — остановить текущую задачу\n"
             "  <b>/pause</b> / <b>/resume</b> — приостановить и продолжить задачу\n"
+            "  <b>/mind</b> X — что я знаю про X (факты + связи)\n"
+            "  <b>/forget</b> X — забыть факты про X\n"
             "  <b>/update</b> — обновить код + перезапуск daemon\n"
             "  <b>/help</b> — эта справка\n\n"
             
@@ -2226,6 +2236,39 @@ class TelegramAdapter:
         Флаг персистим в DB — watchdog не убивает paused-задачу как hang.
         """
         action = "⏸️ Приостанавливаю" if pause else "▶️ Возобновляю"
+
+    async def _handle_mind_query(self, chat_id: int, entity: str) -> None:
+        """(T4) /mind X — что агент знает про сущность (inspectability)."""
+        if not entity:
+            await self._send_message(chat_id, "Напиши: /mind <сущность>\nНапр: /mind Postgres")
+            return
+        from caesar.memory.mind_mirror import MindMirror
+        mirror = MindMirror(self.storage)
+        result = mirror.query(entity)
+        await self._send_message(chat_id, result)
+
+    async def _handle_mind_forget(self, chat_id: int, entity: str) -> None:
+        """(T4) /forget X — забыть факты про сущность (correction)."""
+        if not entity:
+            await self._send_message(chat_id, "Напиши: /forget <сущность>\nНапр: /forget Postgres")
+            return
+        from caesar.memory.mind_mirror import MindMirror
+        mirror = MindMirror(self.storage)
+        parts = entity.split(".", 1)
+        ent = parts[0]
+        attr = parts[1] if len(parts) > 1 else ""
+        count = mirror.forget(ent, attr)
+        if count > 0:
+            await self._send_message(
+                chat_id,
+                f"🗑 Забыто {count} факт(ов) про «{ent}»{f'.{attr}' if attr else ''}.\n"
+                f"Больше не буду это использовать."
+            )
+        else:
+            await self._send_message(
+                chat_id,
+                f"ℹ️ Нет активных фактов про «{ent}»{f'.{attr}' if attr else ''}."
+            )
         await self._send_message(chat_id, f"{action} текущую задачу...")
 
         session = self._sessions.get(chat_id)
