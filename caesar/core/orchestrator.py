@@ -785,9 +785,10 @@ class Orchestrator:
         # Ограничиваем длину сообщения (защита от огромных вводов)
         user_msg = task.user_message[:50000] if len(task.user_message) > 50000 else task.user_message
         
-        # (E2) Prompt prefix caching: split system prompt → stable (rules+tools,
-        # cacheable prefix) + variable (memory+L3+manual+task). DashScope
-        # implicit-cache находит stable-prefix → 80% скидка на токены.
+        # (E2) Prompt prefix caching: stable (rules+tools, cacheable prefix) первым,
+        # variable (memory+L3+manual+task) после. ОДИН system message (DashScope
+        # принимает только один — два вызывали error 400 → нет ответа на voice).
+        # Implicit cache находит stable-prefix внутри одного message → работает.
         stable_prompt, variable_prompt = self._build_system_prompt(
             task, memory_context, len(history_messages), l3_context
         )
@@ -796,8 +797,7 @@ class Orchestrator:
         effective_complexity = analysis.get("complexity") or task.complexity
 
         messages: list[LLMMessage] = [
-            LLMMessage(role="system", content=stable_prompt),
-            LLMMessage(role="system", content=variable_prompt),
+            LLMMessage(role="system", content=stable_prompt + "\n" + variable_prompt),
         ]
         
         # Добавляем историю диалога — адаптивный лимит
