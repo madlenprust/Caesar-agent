@@ -52,9 +52,11 @@
 - TG: `/mind X` — inspect (instant, 0 tokens, no LLM). `/forget X` — supersede L2 facts.
 - `caesar mind export` — full Markdown projection (T2).
 
-**T5. Focus / North Star.**
-- `manual/focus.md` — текущая цель юзера («на этой неделе делаю X»), авто-инжектится
-  как high-priority контекст на каждом ходу. Лёгкий аналог North Star.
+**T5. Focus / North Star.** ✅ DONE (0.17.0)
+- `manual/focus.md` — текущая цель юзера. Ставится natural-language:
+  «сфокусируйся на X» / «на этой неделе делаю X» → write focus.md.
+  «забудь фокус» → delete focus.md.
+- Агент подхватывает через load_manual_context (T2) каждый ход как high-priority контекст.
 
 ### Открытое (не из obsidian-mind)
 - 🔻 Knowledge Graph → semantic triples: извлечение с regex на LLM

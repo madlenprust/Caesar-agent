@@ -407,6 +407,24 @@ class Orchestrator:
         # 4. is_dangerous_command (rm -rf /, mkfs, dd) ВСЁ ЕЩЁ блокируется
         #    внутри ShellExecTool.execute()
 
+        # (T5) Focus/North Star — «сфокусируйся на X» → manual/focus.md.
+        # Агент подхватит через load_manual_context (T2) каждый ход.
+        focus = self._detect_focus(task.user_message)
+        if focus:
+            try:
+                if not hasattr(self, "_mind_mirror") or self._mind_mirror is None:
+                    from caesar.memory.mind_mirror import MindMirror
+                    self._mind_mirror = MindMirror(self.storage, kg=getattr(self, "kg", None))
+                focus_file = self._mind_mirror.manual / "focus.md"
+                self._mind_mirror.manual.mkdir(parents=True, exist_ok=True)
+                focus_file.write_text(focus, encoding="utf-8")
+                self.log.info(f"Focus set: {focus[:80]}")
+                return (f"🎯 Запомнил твой фокус: «{focus}».\n"
+                        f"Буду учитывать это в каждой задаче. "
+                        f"Чтобы сменить — скажи новое. Чтобы убрать — «забудь фокус».")
+            except Exception as e:
+                self.log.warning(f"Focus set failed: {e}")
+
         # (T4) Natural-language mind query/forget — 0 токенов, до LLM.
         # Юзер говорит «что ты знаешь про X?» / «забудь X» — оркестратор
         # детектит и отвечает напрямую из БД. Без слэш-команд, разговорно.
@@ -423,6 +441,12 @@ class Orchestrator:
                     count = self._mind_mirror.forget(entity)
                     return (f"🗑 Забыто {count} факт(ов) про «{entity}».\n"
                             f"{'Больше не буду это использовать.' if count else 'Нет активных фактов.'}")
+                elif action == "forget_focus":
+                    focus_file = self._mind_mirror.manual / "focus.md"
+                    if focus_file.exists():
+                        focus_file.unlink()
+                        return "🎯 Фокус забыт. Больше не буду его учитывать."
+                    return "ℹ️ Фокус не был установлен."
             except Exception as e:
                 self.log.warning(f"Mind query/forget failed: {e}")
 
@@ -1877,6 +1901,9 @@ class Orchestrator:
         # Forget: «забудь ... про X» / «забудь X» / «забудь всё что знаешь про X»
         if msg_lower.startswith("забудь"):
             rest = msg[6:].strip()  # after "забудь"
+            # «забудь фокус» — удалить manual/focus.md (T5)
+            if rest.lower().startswith(("фокус", "focus")):
+                return ("forget_focus", "")
             # Find "про X" or "о X" anywhere → extract entity
             m = re.search(r"\b(?:про|о)\b\s+(.+)", rest, re.IGNORECASE)
             if m:
@@ -1889,10 +1916,39 @@ class Orchestrator:
                 return ("forget", entity)
         return None
 
+    @staticmethod
+    def _detect_focus(user_message: str) -> str | None:
+        """Natural-language детектор «сфокусируйся на X» / «на этой неделе делаю X».
+
+        Возвращает текст фокуса или None. Записывается в manual/focus.md (T5).
+        Агент подхватывает через load_manual_context (T2) каждый ход.
+        """
+        msg = user_message.strip()
+        msg_lower = msg.lower()
+        # «сфокусируйся на X» / «фокус на X»
+        for trigger in ("сфокусируйся на ", "фокус на ", "сфокусируйся ",
+                         "focus on ", "сфокусируйся:"):
+            if msg_lower.startswith(trigger):
+                focus = msg[len(trigger):].strip().rstrip("?.!")
+                if focus:
+                    return focus
+        # «на этой неделе я работаю над X» / «сейчас делаю X»
+        for trigger in ("на этой неделе я работаю над ",
+                         "на этой неделе работаю над ",
+                         "сейчас я работаю над ",
+                         "сейчас делаю ",
+                         "моя текущая задача: ",
+                         "моя текущая задача "):
+            if msg_lower.startswith(trigger):
+                focus = msg[len(trigger):].strip().rstrip("?.!")
+                if focus:
+                    return focus
+        return None
+
     def _detect_direct_command(self, user_message: str, user_id: str = "") -> str | None:
         """Детектор прямых команд — когда пользователь явно просит
         выполнить shell команду.
-        
+
         Args:
             user_message: сообщение пользователя
             user_id: ID пользователя (для проверки god_mode)
