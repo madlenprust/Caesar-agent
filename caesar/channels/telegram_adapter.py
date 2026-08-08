@@ -617,6 +617,21 @@ class TelegramAdapter:
         if text.startswith("/"):
             if text == "/start":
                 await self._send_message(chat_id, "Привет! Я Caesar. Просто напиши мне задачу.\n\nНапиши «помощь» чтобы увидеть все команды.")
+            elif text in ("/web", "/webpanel"):
+                # (Web panel) вкл/выкл через маркер-файл
+                marker = self.storage.db_path.parent / "web_enabled"
+                if marker.exists():
+                    marker.unlink()
+                    await self._send_message(chat_id, "🌐 Web panel выключен.")
+                else:
+                    marker.touch()
+                    await self._send_message(
+                        chat_id,
+                        "🌐 Web panel включён! Доступен на http://localhost:8080\n"
+                        "Endpoints: /status /tasks /mind?entity=X\n"
+                        "Webhook: POST /webhook с JSON {\"message\": \"текст\"}\n"
+                        "Вступит в силу после рестарта daemon (обновись)."
+                    )
             elif text == "/status":
                 status = await self._get_status_text(chat_id)
                 await self._send_message(chat_id, status)
@@ -1860,6 +1875,7 @@ class TelegramAdapter:
             
             "<b>Управление:</b>\n"
             "  <b>/status</b> — состояние системы, память, токены, модели\n"
+            "  <b>/web</b> — вкл/выкл web panel (localhost:8080)\n"
             "  <b>/clear</b> — очистить контекст диалога (начать заново)\n"
             "  <b>/stop</b> — остановить текущую задачу\n"
             "  <b>/pause</b> / <b>/resume</b> — приостановить и продолжить задачу\n"

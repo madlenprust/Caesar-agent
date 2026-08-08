@@ -102,6 +102,33 @@ class AgentDaemon:
         
         self._server: asyncio.AbstractServer | None = None
         self._running = False
+        self._web_panel = None
+
+    async def _maybe_start_web_panel(self) -> None:
+        """Запустить web panel если включён в config или через /web."""
+        web_cfg = getattr(self.config, "web", None)
+        enabled = False
+        port = 8080
+        if web_cfg:
+            enabled = getattr(web_cfg, "enabled", False)
+            port = getattr(web_cfg, "port", 8080)
+        # Также проверяем маркер-файл (ставится командой /web)
+        web_marker = getattr(self.storage, "db_path", None)
+        if web_marker:
+            web_marker = web_marker.parent / "web_enabled"
+            if web_marker.exists():
+                enabled = True
+        if enabled and not self._web_panel:
+            from caesar.core.web_panel import WebPanel
+            self._web_panel = WebPanel(
+                self.config, self.storage, self.queue,
+                event_bus=self.event_bus, daemon=self,
+            )
+            host = "127.0.0.1"  # localhost only по умолчанию
+            await self._web_panel.start(host=host, port=port)
+        elif not enabled and self._web_panel:
+            await self._web_panel.stop()
+            self._web_panel = None
     
     async def start(self) -> None:
         self.log.info(f"Agent daemon starting (dev={IS_DEV})")
@@ -126,7 +153,10 @@ class AgentDaemon:
         await self.queue.start()
         await self.orchestrator.start()
         await self.cron.start()
-        
+
+        # Web panel (если включён в config или через маркер-файл)
+        await self._maybe_start_web_panel()
+
         # Auto-register dream cycle и morning briefing как cron задачи
         await self._register_auto_cron()
         

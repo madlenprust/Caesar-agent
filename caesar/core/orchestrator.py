@@ -1439,14 +1439,15 @@ class Orchestrator:
 - Поиск: web_search (Bing+DDG), github_releases, hn_search, reddit_search, wikipedia_read, rss_read, tg_read_channel
 - Браузер: browser_fetch (рендер JS-страниц, SPA), browser_action (клики, формы, скриншоты, логин) — headless Chromium (Playwright)
 - Файлы: read_file, write_file, edit_file, find_files, grep, parse_pdf/docx/xlsx/csv
-- Память: 4 уровня — L1 (RAM), L2 (факты с категориями: решение/победа/инцидент), L3 (векторный поиск), L4 (скиллы-рецепты). KG — граф сущностей и связей. Dream cycle ночью консолидирует.
+- Память: 4 уровня — L1 (RAM), L2 (факты с категориями: решение/победа/инцидент), L3 (векторный поиск), L4 (скиллы-рецепты). KG — граф сущностей и связей (semantic triples через LLM). Dream cycle ночью консолидирует + prune/merge скиллов.
 - Голос: принимаешь голосовые (STT faster-whisper) и отвечаешь голосом (TTS edge-tts)
 - Cron: планировщик задач по расписанию, quiet hours (откладывает, не теряет)
-- Self-improvement: авто-сохранение скиллов из опыта, anti_patterns, 🧠 уведомления о самообучении
-- Mind Mirror: Markdown-проекция памяти (caesar mind export), manual/ overlay (юзер правит «что агент знает»)
+- Self-improvement: авто-сохранение скиллов из опыта, anti_patterns, 🧠 уведомления о самообучении, авто-prune broken skills
+- Mind Mirror: Markdown-проекция памяти (caesar mind export), manual/ overlay, /mind X (inspect), /forget X (correct), focus (north star)
+- Web panel: /web команда в TG → HTTP API на localhost:8080 (/status /tasks /mind /webhook)
 - Безопасность: exact_deny always-on (снос системы блокирован даже в god mode), disk-format и remote разрешены
 - Multi-provider: несколько LLM-провайдеров (smart/cheap), pacing, meaning-based error classification
-- Token economy: prompt prefix caching (DashScope implicit), cheap-LLM экстракция search-результатов
+- Token economy: prompt prefix caching (DashScope implicit+explicit), cheap-LLM экстракция search-результатов
 
 РАЗГОВОРНЫЕ КОМАНДЫ (юзер может сказать словами):
 - «что ты знаешь про X» — покажи факты и связи из памяти
@@ -1454,21 +1455,18 @@ class Orchestrator:
 - «что нового про X» → свежие новости (time_filter=week). «расскажи про X» → обзор.
 - «выполни команду X» → shell_exec. «обновись» → caesar update.
 - «забудь X» — забыть факты про X (supersede).
-В TG также: /pause /resume /stop /mind /forget /status /clear /help
+- «сфокусируйся на X» — текущая цель (focus, auto-inject каждый ход).
+В TG также: /pause /resume /stop /mind /forget /web /status /clear /help
 
-ИНСТРУМЕНТЫ:
-- shell_exec — команды терминала
-- web_search / web_fetch / http_request — поиск и HTTP
-- browser_fetch / browser_action — JS-браузер (Playwright)
-- github_releases / github_search — GitHub
-- hn_search / reddit_search / wikipedia_read / rss_read / tg_read_channel — источники
-- memory_add_fact / memory_delete / memory_search — L2 память (category: decision/win/incident/fact/preference)
-- read_file / write_file / edit_file / find_files / grep — файлы
-- parse_pdf / parse_docx / parse_xlsx / parse_csv — документы
-- skill_find — найти скилл
-- cron_add / cron_list / cron_remove — планировщик
-- self_read / self_edit / self_scan / self_test — самопознание
+ИНСТРУМЕНТЫ (доступные тебе):
 """
+        # Auto-gen tool list from registry — не hardcoded, обновляется при добавлении новых тулов.
+        try:
+            tool_names = sorted(self.tools.list_names())
+            stable += "\n".join(f"- {n}" for n in tool_names) + "\n"
+        except Exception:
+            stable += "- (tool list unavailable)\n"
+        stable += "\"\"\""
         variable = ""
         # ИЗНАЧАЛЬНАЯ ЗАДАЧА — чтобы LLM могла self-check перед вопросами
         if task.original_directive and task.original_directive != task.user_message:
