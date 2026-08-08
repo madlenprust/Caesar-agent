@@ -257,4 +257,21 @@ class L4Skills:
             "source_msg_id": source_msg_id,
         })
         skill.version += 1
+
+    def delete_skill(self, name: str) -> bool:
+        """Удалить скилл из БД и YAML. Возвращает True если удалён."""
+        with self.storage._conn() as conn:
+            cur = conn.execute("DELETE FROM l4_skills WHERE name = ?", (name,))
+            conn.commit()
+        # Также удалить YAML если есть
+        for yf in self.skills_dir.glob("*.yaml"):
+            try:
+                import yaml as _yaml
+                data = _yaml.safe_load(yf.read_text(encoding="utf-8"))
+                if data and data.get("name") == name:
+                    yf.unlink()
+                    break
+            except Exception:
+                pass
+        return cur.rowcount > 0
         self.save_skill(skill)

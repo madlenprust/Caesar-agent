@@ -41,10 +41,8 @@
 - НЕ two-way sync проекции (кошмар с temporal/vector структурой). Только curated overlay.
 - Browsable в Obsidian, но Obsidian НЕ обязателен.
 
-**T3. Context-manifest + meter на ход.**
-- После сборки контекста хода (L1 recent + L2 + L3 + KG) и до LLM-вызова — логировать
-  компактный manifest: что подтянуто + ~токенов. Footer в CLI/TG
-  («context: 3 L2, 5 L3, 2 KG, ~1.8K tok»). Transparency как у obsidian-mind meter.
+**T3. Context-manifest + meter на ход.** ✅ DONE (0.18.0)
+- После сборки контекста (L1+L2+L3+KG) — log manifest: «Context manifest: L2=N facts, L3=N chunks, ~N tokens».
 
 **T4. `caesar mind` + TG-команда «что ты знаешь про X».** ✅ DONE (0.16.0)
 - MindMirror.query(entity) → L2 active facts + KG relations (filtered by user_id).
@@ -59,10 +57,8 @@
 - Агент подхватывает через load_manual_context (T2) каждый ход как high-priority контекст.
 
 ### Открытое (не из obsidian-mind)
-- 🔻 Knowledge Graph → semantic triples: извлечение с regex на LLM
-  (subject→relation→object). Интеграция в L3-ranking УЖЕ есть (KG-boost +15%);
-  открыто само LLM-извлечение (сейчас `knowledge_graph.py` — regex).
-- 🔻 Web-панель + webhook — не начато.
+- 🔻 ~~Knowledge Graph → semantic triples~~ ✅ DONE (0.18.0) — extract_relations_llm (cheap LLM → semantic triples), fallback на regex. Dream cycle использует process_text_async.
+- 🔻 ~~Web-панель + webhook~~ ✅ DONE (0.18.0) — caesar/core/web_panel.py (stdlib asyncio, без зависимостей). GET /status /tasks /mind?entity=X. POST /webhook → task в очередь.
 
 ### Не берём из obsidian-mind (обосновано)
 - ❌ Markdown-vault как primary storage — дублировал бы L2/L3/KG, ломал temporal/vector.
@@ -91,7 +87,9 @@
 - telegram_adapter: юзер написал голосом → `session.voice_reply=True` → ответ TTS → `send_voice`.
   one-shot (сбрасывается после ответа). Fallback на текст если TTS недоступен.
 - завершает voice-loop (вход STT есть, выход TTS — добавляем).
-**H3. (polish) Self-improving:** auto-merge похожих скиллов, auto-prune low-success.
+**H3. (polish) Self-improving:** ✅ DONE (0.18.0)
+- Dream Phase 8: prune broken skills (0 success + ≥3 failures → delete), merge duplicates (similar triggers → keep higher success_count).
+- L4.delete_skill(name) — из БД + YAML.
 
 ### Token Economy (вдохновлено статьёй Writer «AI harness», 2026-07-26)
 Writer: orchestration-слой → -38% токенов, -41% cost, -44% time, success не упал.
@@ -103,15 +101,14 @@ github_releases/hn_search/reddit_search/wikipedia_read/rss_read/tg_read_channel)
 Gate: только большие результаты (>2000 chars) → +1 cheap-LLM вызов (~$0.001)
 vs -3000+ smart-LLM токенов. Fallback на brute-truncation если cheap-LLM недоступен.
 Статья Writer валидировала: -38% токенов через subagent → concise summary.
-**E2. Prompt-prefix кэширование.** ✅ DONE (0.14.1)
+**E2. Prompt-prefix кэширование.** ✅ DONE (0.14.1 + 0.18.0)
 Подтверждено: DashScope поддерживает prefix-caching (implicit auto, 20% hit cost) для
 qwen3.7-max + glm-5.2. Fix: _build_system_prompt → tuple (stable, variable). Stable
 (rules+tools, ~8000 tok, 100% static) — первый system message → cacheable prefix.
-Variable (memory+L3+manual+task) — второй. Caller: два system messages вместо одного.
-DashScope implicit-cache находит stable-prefix → 80% скидка. + ReAct history prefix
-(шаги 1-N) — auto-cached. Оценка: -64% токенов на 10-шаговом ReAct.
-Pre-condition: ✅ dashscope implicit caching подтверждён для qwen3.7-max + glm-5.2.
-TODO: explicit cache_control markers (10% hit cost vs 20% implicit) — follow-up.
+Variable (memory+L3+manual+task) — второй. Caller: один system message (stable+variable),
+stable-prefix-first для implicit cache. 0.18.0: explicit cache_control на первый
+system message → 10% hit cost (vs 20% implicit), DashScope поддерживает.
+Оценка: -72% токенов на 10-шаговом ReAct.
 
 ## Принципы развития
 1. Сначала простая рабочая версия, потом усложняем.

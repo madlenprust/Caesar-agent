@@ -247,6 +247,61 @@ class KnowledgeGraph:
     def __init__(self, storage: Storage):
         self.storage = storage
         self.log = get_logger("kg")
+        self._llm = None  # set by dream cycle for LLM-based extraction
+
+    def set_llm(self, llm_router) -> None:
+        """Inject LLM router for semantic triple extraction (dream cycle)."""
+        self._llm = llm_router
+
+    async def extract_relations_llm(self, text: str, entities: list[dict]) -> list[dict]:
+        """LLM-based semantic triple extraction (subject→relation→object).
+
+        Заменяет regex-извлечение когда LLM доступна (dream cycle).
+        Возвращает [{from_entity, to_entity, relation_type}, ...].
+        Fallback на regex extract_relations если LLM недоступна.
+        """
+        if not self._llm or not self._llm.cheap.api_key:
+            return extract_relations(text, entities)
+
+        entity_names = [e["name"] for e in entities]
+        if not entity_names:
+            return []
+
+        try:
+            system = (
+                "Извлеки семантические отношения (triples) между сущностями из текста. "
+                "Верни JSON массив: [{\"from_entity\": \"X\", \"relation_type\": \"works_at\", "
+                "\"to_entity\": \"Y\"}]. relation_type — короткий глагол/существительное "
+                "(works_at, founded, acquired, partnered_with, invested_in, created, etc). "
+                "Только отношения между УКАЗАННЫМИ сущностями. Если нет — пустой массив []."
+            )
+            user_msg = (
+                f"Сущности: {', '.join(entity_names[:20])}\n\n"
+                f"Текст:\n{text[:4000]}"
+            )
+            from caesar.core.llm import LLMMessage
+            resp = await self._llm.cheap_chat(
+                [LLMMessage(role="system", content=system),
+                 LLMMessage(role="user", content=user_msg)],
+                temperature=0.1, max_tokens=500,
+            )
+            import json as _json
+            content = resp.content.strip()
+            if content.startswith("```"):
+                content = content.split("\n", 1)[1].rsplit("```", 1)[0].strip()
+            triples = _json.loads(content)
+            # Валидация: только triples с известными entities
+            valid = []
+            for t in triples:
+                fe = t.get("from_entity", "").strip()
+                te = t.get("to_entity", "").strip()
+                rt = t.get("relation_type", "").strip()
+                if fe and te and rt and fe in entity_names and te in entity_names:
+                    valid.append({"from_entity": fe, "to_entity": te, "relation_type": rt})
+            return valid
+        except Exception as e:
+            self.log.warning(f"LLM relation extraction failed, fallback to regex: {e}")
+            return extract_relations(text, entities)
     
     def process_text(
         self,
@@ -267,7 +322,8 @@ class KnowledgeGraph:
         if not text or len(text) < 20:
             return {"entities_found": 0, "entities_new": 0, "relations_found": 0, "relations_new": 0}
         
-        # Извлекаем
+        # Извлекаем entities (regex) и relations (regex — sync path)
+        # Для LLM extraction dream cycle использует process_text_async.
         entities = extract_entities(text)
         relations = extract_relations(text, entities)
         
@@ -297,6 +353,53 @@ class KnowledgeGraph:
                 f"{len(relations)} relations ({new_relations} new)"
             )
         
+        return {
+            "entities_found": len(entities),
+            "entities_new": new_entities,
+            "relations_found": len(relations),
+            "relations_new": new_relations,
+        }
+
+    async def process_text_async(
+        self,
+        text: str,
+        user_id: str,
+        source_chunk_id: str | None = None,
+    ) -> dict:
+        """Async-версия: entities (regex) + relations (LLM если доступна).
+
+        Dream cycle вызывает ЭТО — LLM извлекает semantic triples.
+        Fallback на regex если LLM недоступна.
+        """
+        if not text or len(text) < 20:
+            return {"entities_found": 0, "entities_new": 0,
+                    "relations_found": 0, "relations_new": 0}
+
+        entities = extract_entities(text)
+        relations = await self.extract_relations_llm(text, entities)
+
+        new_entities = 0
+        for ent in entities:
+            try:
+                if self._upsert_entity(user_id, ent, source_chunk_id):
+                    new_entities += 1
+            except Exception as e:
+                self.log.debug(f"Failed to save entity {ent['name']}: {e}")
+
+        new_relations = 0
+        for rel in relations:
+            try:
+                if self._add_relation(user_id, rel, source_chunk_id):
+                    new_relations += 1
+            except Exception as e:
+                self.log.debug(f"Failed to save relation: {e}")
+
+        if entities or relations:
+            self.log.info(
+                f"KG (LLM): extracted {len(entities)} entities ({new_entities} new), "
+                f"{len(relations)} relations ({new_relations} new)"
+            )
+
         return {
             "entities_found": len(entities),
             "entities_new": new_entities,

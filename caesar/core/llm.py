@@ -229,8 +229,12 @@ class OpenAICompatibleProvider(LLMProvider):
                     "content": m.content,
                     **({"name": m.name} if m.name else {}),
                     **({"tool_call_id": m.tool_call_id} if m.tool_call_id else {}),
+                    # (E2) Explicit cache_control on first system message (stable prefix).
+                    # DashScope: 10% hit cost (vs 20% implicit), 5min TTL, deterministic.
+                    **({"cache_control": {"type": "ephemeral"}}
+                       if i == 0 and m.role == "system" else {}),
                 }
-                for m in messages
+                for i, m in enumerate(messages)
             ],
             "temperature": temperature,
         }

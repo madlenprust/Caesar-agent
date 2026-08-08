@@ -43,6 +43,9 @@ class DreamCycle:
         self.storage = storage
         self.kg = kg
         self.llm = llm_router
+        # (KG) Inject LLM into KG for semantic triple extraction
+        if kg and llm_router:
+            kg.set_llm(llm_router)
         self.event_bus = event_bus
         self.l3 = l3_memory
         self.log = get_logger("dream")
@@ -156,6 +159,19 @@ class DreamCycle:
         except Exception as e:
             self.log.error(f"Phase 7 (mind mirror) failed: {e}")
 
+        # Phase 8 (H3): Skill maintenance — prune broken skills + merge duplicates.
+        if not force_topic and self._l4:
+            try:
+                pruned, merged = self._phase_skill_maintenance()
+                report["skills_pruned"] = pruned
+                report["skills_merged"] = merged
+                self.log.info(f"Phase 8 (skill maintenance): pruned={pruned}, merged={merged}")
+            except Exception as e:
+                self.log.error(f"Phase 8 (skill maintenance) failed: {e}")
+        else:
+            report["skills_pruned"] = 0
+            report["skills_merged"] = 0
+
         report["duration_sec"] = (datetime.now() - start_time).total_seconds()
         
         self.log.info(
@@ -208,8 +224,8 @@ class DreamCycle:
         for row in rows:
             d = dict(row)
             try:
-                # Извлекаем entities
-                result = self.kg.process_text(
+                # (KG) LLM-based semantic triple extraction (fallback на regex)
+                result = await self.kg.process_text_async(
                     text=d["content"],
                     user_id=d["user_id"],
                     source_chunk_id=d["id"],
@@ -855,3 +871,72 @@ class DreamCycle:
         lines.append(f"\n  Время: {report['duration_sec']:.1f} сек")
         
         return "\n".join(lines)
+
+    def _phase_skill_maintenance(self) -> tuple[int, int]:
+        """Phase 8 (H3): Skill maintenance — prune broken + merge duplicates.
+
+        - Prune: skills with success_count=0 AND consecutive_failures >= 3 → delete
+          (they're not working, just noise).
+        - Merge: skills with similar triggers (same first 3 words) → keep the one
+          with higher success_count, combine anti_patterns.
+        Returns (pruned_count, merged_count).
+        """
+        pruned = 0
+        merged = 0
+        skills = self._l4.list_skills()
+        if not skills:
+            return 0, 0
+
+        # 1. Prune broken skills
+        for s in skills:
+            d = dict(s) if not isinstance(s, dict) else s
+            success = d.get("success_count", 0)
+            failures = d.get("consecutive_failures", 0)
+            if success == 0 and failures >= 3:
+                name = d.get("name", "")
+                try:
+                    self._l4.delete_skill(name)
+                    pruned += 1
+                    self.log.info(f"Pruned broken skill: {name} (0 success, {failures} failures)")
+                except Exception as e:
+                    self.log.warning(f"Failed to prune skill {name}: {e}")
+
+        # 2. Merge duplicates (similar triggers)
+        remaining = self._l4.list_skills()
+        seen_triggers: dict[str, str] = {}  # trigger_key → skill_name (best)
+        for s in remaining:
+            d = dict(s) if not isinstance(s, dict) else s
+            name = d.get("name", "")
+            trigger = d.get("trigger", "")
+            # Key: first 3 significant words of trigger
+            words = [w for w in trigger.lower().split() if len(w) > 2]
+            key = " ".join(words[:3])
+            if not key:
+                continue
+            if key in seen_triggers:
+                # Duplicate — keep the one with higher success_count
+                best_name = seen_triggers[key]
+                best = self._l4.get_skill(best_name)
+                cur_success = d.get("success_count", 0)
+                best_success = best.success_count if best else 0
+                if cur_success > best_success:
+                    # Current is better — swap
+                    try:
+                        self._l4.delete_skill(best_name)
+                        merged += 1
+                        self.log.info(f"Merged skill: {best_name} into {name} (better success)")
+                        seen_triggers[key] = name
+                    except Exception:
+                        pass
+                else:
+                    # Best is better — delete current
+                    try:
+                        self._l4.delete_skill(name)
+                        merged += 1
+                        self.log.info(f"Merged skill: {name} into {best_name} (better success)")
+                    except Exception:
+                        pass
+            else:
+                seen_triggers[key] = name
+
+        return pruned, merged

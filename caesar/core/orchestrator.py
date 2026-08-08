@@ -797,6 +797,16 @@ class Orchestrator:
             except Exception as e:
                 self.log.warning(f"L3 auto-search failed: {e}")
         
+        # (T3) Context manifest — компактный лог что подтянуто (transparency).
+        # obsidian-mind-style meter: юзер видит какой контекст пошёл в ход.
+        l2_count = memory_context.count("= ") if memory_context else 0
+        l3_count = l3_context.count("chunk") if l3_context else 0
+        est_tokens = (len(memory_context) + len(l3_context)) // 4
+        self.log.info(
+            f"Context manifest: L2={l2_count} facts, L3={l3_count} chunks, "
+            f"~{est_tokens} tokens"
+        )
+
         # Тривиальный запрос — отвечаем сразу через cheap analyzer.
         # Не зовём умную LLM для "привет", "спасибо" — экономим токены.
         if analysis.get("is_trivial") and analysis.get("trivial_response"):
